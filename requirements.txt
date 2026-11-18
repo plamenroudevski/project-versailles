@@ -1,0 +1,8 @@
+# Exact versions, so Streamlit Cloud installs the same packages as your PC.
+fastf1==3.9.2
+streamlit==1.67.0
+plotly==7.1.0
+pytest==9.2.0
+# Installed by FastF1 anyway, but our code imports them directly, so pin them too.
+pandas==2.3.3
+requests==2.34.2
