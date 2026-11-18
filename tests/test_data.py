@@ -1,13 +1,32 @@
 """
-Tests for data.py's deleted-lap matching (no internet needed).
+Tests for data.py (no internet needed): deleted-lap matching and notes files.
 
 Race control's "LAP n" didn't match OpenF1's lap numbers in 2026 Brazil, so
 data.py matches the incident's local clock time to the lap being driven.
 """
 
 import pandas as pd
+import pytest
 
 import data
+
+
+def test_notes_file_name():
+    # Accents dropped, short session code, driver codes sorted so either order finds the same notes.
+    session = pd.Series({"year": 2026, "location": "São Paulo", "session_name": "Qualifying"})
+    assert data.notes_path(session, ("RUS", "NOR")).name == "2026_sao_paulo_Q_NOR_RUS.md"
+    assert data.notes_path(session, ("NOR", "RUS")) == data.notes_path(session, ("RUS", "NOR"))
+
+
+def test_creating_notes_never_overwrites(tmp_path):
+    # tmp_path is a fresh empty folder pytest makes for this test, so real notes are never touched.
+    path = tmp_path / "notes" / "2026_sao_paulo_Q_NOR_RUS.md"
+    data.create_notes(path)
+    assert path.read_text(encoding="utf-8") == data.NOTES_TEMPLATE
+    path.write_text("NOR lifts early into T1.", encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        data.create_notes(path)
+    assert data.read_notes(path) == "NOR lifts early into T1."
 
 
 def test_deleted_lap_found_by_incident_time():

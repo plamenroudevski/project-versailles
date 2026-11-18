@@ -18,12 +18,17 @@ in FastF1's cache folder. The same request within 12 hours is answered from
 disk: instant, works offline, and doesn't use up OpenF1's rate limit.
 The app adds Streamlit's in-memory cache on top of this.
 
+Your notes: plain Markdown files in notes/, one per session and driver pair,
+so you can write them in Obsidian and commit them with the code. No database.
+
 Missing data raises LookupError with a message written for the user, so the
 app can show it as-is.
 """
 
 import re
 import time
+import unicodedata
+from pathlib import Path
 
 import fastf1
 import numpy as np
@@ -300,3 +305,55 @@ def session_had_rain(session_key):
     """True if the weather station reported rain at any point in the session."""
     weather = openf1("weather", session_key=session_key)
     return bool(not weather.empty and weather["rainfall"].any())
+
+
+# ---- Your notes ------------------------------------------------------------------
+
+NOTES_DIR = Path(__file__).parent / "notes"
+
+# Short session codes for note file names (anything else is spelled out).
+SESSION_CODES = {"Practice 1": "FP1", "Practice 2": "FP2", "Practice 3": "FP3", "Qualifying": "Q",
+                 "Sprint Qualifying": "SQ", "Sprint Shootout": "SQ", "Sprint": "S", "Race": "R"}
+
+NOTES_TEMPLATE = """\
+## What the telemetry shows
+-
+
+## What I think caused it
+-
+
+## To check next time
+-
+"""
+
+
+def slug(text):
+    """'São Paulo' -> 'sao_paulo': lowercase letters, digits and underscores, safe in any file name."""
+    plain = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()  # drop accents
+    return re.sub(r"[^a-z0-9]+", "_", plain.lower()).strip("_")
+
+
+def notes_path(session, names):
+    """Where your notes for a comparison live, e.g. notes/2026_sao_paulo_Q_NOR_RUS.md.
+
+    Uses the city, not the country: the USA alone has three races. The two
+    driver codes are sorted, so NOR vs RUS and RUS vs NOR share one file.
+    """
+    code = SESSION_CODES.get(session["session_name"], slug(session["session_name"]))
+    return NOTES_DIR / f"{session['year']}_{slug(session['location'])}_{code}_{'_'.join(sorted(names))}.md"
+
+
+def read_notes(path):
+    """The notes file's text, or None if you haven't written one."""
+    return path.read_text(encoding="utf-8") if path.exists() else None
+
+
+def create_notes(path):
+    """Create an empty notes file from NOTES_TEMPLATE.
+
+    Never overwrites: mode "x" means "create a new file", and fails with
+    FileExistsError if the file is already there, so your notes can't be wiped.
+    """
+    path.parent.mkdir(exist_ok=True)
+    with path.open("x", encoding="utf-8") as file:
+        file.write(NOTES_TEMPLATE)

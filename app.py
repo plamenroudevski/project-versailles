@@ -9,7 +9,7 @@ Run it from the project folder:
     streamlit run app.py
 
 Layout: sidebar pickers (year -> event -> session -> driver A -> driver B,
-plus an optional lap for each), then the findings, then the charts.
+plus an optional lap for each), then the findings, your notes, the charts.
 
 How Streamlit works, in short: every time you touch a widget, Streamlit
 re-runs this whole script from top to bottom. That's simple, but it would
@@ -20,7 +20,9 @@ inputs". A re-run with the same inputs gets the remembered answer instantly.
 Under that, data.py's FastF1 disk cache keeps raw downloads for 12 hours.
 """
 
+import re
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import pandas as pd
 import requests
@@ -80,6 +82,11 @@ def stop(message, show=st.info):
 def plain(text):
     """Stop Markdown reading '~0.2 s ... ~15 m' as strikethrough (it treats ~text~ that way)."""
     return text.replace("~", "\\~")
+
+
+def running_locally():
+    """True when the app is open at localhost (your own computer), not on the hosted site."""
+    return urlparse(st.context.url or "").hostname in {"localhost", "127.0.0.1", "::1"}
 
 
 def lap_label(lap):
@@ -172,7 +179,28 @@ with right:
     st.caption("Heuristic: one lap's telemetry can suggest a cause but can't prove it.")
     st.markdown("\n".join(f"- {plain(line)}" for line in result["read"]))
 
-lap_drivers = [lap["driver"] for lap in run["laps"]]
+# Your own notes: a plain Markdown file per session and driver pair (see data.notes_path).
+# Read fresh on every run, so after saving a note in Obsidian, refresh the page.
+notes_file = data.notes_path(run["session"], pair)
+notes = data.read_notes(notes_file)
+if notes is not None:
+    st.markdown("#### My notes")
+    with st.container(border=True):
+        # Show the file's headings three levels smaller ("#" -> "####"), so they sit
+        # under "My notes" instead of outranking it. The file itself is unchanged.
+        st.markdown(re.sub(r"(?m)^(#{1,6}) ", lambda m: "#" * min(6, len(m[1]) + 3) + " ", notes))
+    st.caption(f"From notes/{notes_file.name}")
+elif running_locally():
+    # Only offered on your computer: the hosted app's disk is wiped on every
+    # restart, so there your notes come from what you've pushed to GitHub.
+    if st.button(f"Create notes file: notes/{notes_file.name}"):
+        try:
+            data.create_notes(notes_file)
+        except FileExistsError:
+            pass  # already created (say, from another tab): the re-run below shows it
+        st.rerun()
+
+lap_drivers =[lap["driver"] for lap in run["laps"]]
 colours = charts.driver_colours([d["team_colour"] for d in lap_drivers], [d["team_name"] for d in lap_drivers])
 plotly_config = {"displaylogo": False}
 # theme=None keeps charts.py's own styling instead of Streamlit's default chart theme.
