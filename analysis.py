@@ -100,6 +100,11 @@ PATTERN_MIN_ZONES = 2
 PATTERN_MIN_TIME_S = 0.01
 # Zone gaps smaller than this count as "level" in the car/driver read.
 
+MINI_SECTORS = 25
+# The track map is cut into this many equal-length pieces, each coloured by
+# the faster driver. ~170 m each on a 4.3 km lap: short enough to show where
+# time changes hands, long enough not to flicker with sample noise.
+
 # =============================================================================
 
 
@@ -565,6 +570,17 @@ def driver_vs_car(results, names):
     return lines or ["No clear pattern: the gaps are too small or too few to read."]
 
 
+def mini_sector_winners(a, delta, count=MINI_SECTORS):
+    """Cut the lap into `count` equal-length pieces and say who was faster in each.
+
+    Returns a list of (start m, end m, winner), winner 0 for A or 1 for B.
+    If the gap (B minus A) grows across a piece, B lost time there, so A was faster.
+    """
+    edges = np.linspace(0.0, float(a["Distance"].iloc[-1]), count + 1)
+    gaps = np.interp(edges, a["Distance"], delta)
+    return [(edges[i], edges[i + 1], 0 if gaps[i + 1] > gaps[i] else 1) for i in range(count)]
+
+
 def compare(tel_a, lap_time_a, tel_b, lap_time_b, corners, names):
     """Run the whole analysis on two laps. `names` is (A, B), e.g. ("NOR", "RUS").
 
@@ -576,6 +592,7 @@ def compare(tel_a, lap_time_a, tel_b, lap_time_b, corners, names):
       table     zone table (see zone_table)
       findings  ranked findings (see rank_findings)
       read      driver-vs-car sentences (see driver_vs_car)
+      mini_sectors  faster driver per mini-sector (see mini_sector_winners)
     """
     a, b, delta = align_laps(tel_a, lap_time_a, tel_b, lap_time_b)
     corner_table = locate_corners(corners, a)
@@ -585,6 +602,7 @@ def compare(tel_a, lap_time_a, tel_b, lap_time_b, corners, names):
         "table": zone_table(zones, names),
         "findings": rank_findings(zones, names),
         "read": driver_vs_car(zones, names),
+        "mini_sectors": mini_sector_winners(a, delta),
     }
 
 
@@ -615,23 +633,43 @@ def print_zone_table(table, names):
         print(shown.to_string(index=False))
 
 
-def main(year, place, session_name, name_a, name_b):
-    import fastf1
+def load_and_compare(year, place, session_name, name_a, name_b):
+    """Download a session and compare two drivers' fastest valid laps.
 
-    import data  # only the terminal entry point downloads anything
+    Used by the terminal scripts (this file and charts.py). The app calls the
+    data.py steps itself, so it can cache each one. Returns a dict with the
+    session, both laps (from data.load_lap), the raw corner markers, the lap
+    times, whether it rained, and the compare() result.
+    """
+    import data  # imported here so the rest of this file never needs the internet
 
-    fastf1.set_log_level("ERROR")
     session = data.find_session(year, place, session_name)
     laps = [data.load_lap(session, name) for name in (name_a, name_b)]
     corners = data.get_corners(year, int(session["circuit_key"]))
     times = [float(lap["lap"]["lap_duration"]) for lap in laps]
     result = compare(laps[0]["telemetry"], times[0], laps[1]["telemetry"], times[1], corners, (name_a, name_b))
+    return {"session": session, "laps": laps, "corners": corners, "times": times,
+            "rain": data.session_had_rain(int(session["session_key"])), "result": result}
 
-    print(f"{year} {session['location']} {session['session_name']}: "
-          f"{name_a} lap {laps[0]['lap']['lap_number']} {lap_time_text(times[0])} vs "
-          f"{name_b} lap {laps[1]['lap']['lap_number']} {lap_time_text(times[1])} "
-          f"(gap {times[1] - times[0]:+.3f} s)")
-    if data.session_had_rain(int(session["session_key"])):
+
+def title_text(run, names):
+    """One-line heading, e.g. '2026 São Paulo Qualifying: NOR lap 23 1:27.470 vs RUS lap 18 1:26.745 (gap -0.725 s)'."""
+    session, laps, times = run["session"], run["laps"], run["times"]
+    return (f"{session['year']} {session['location']} {session['session_name']}: "
+            f"{names[0]} lap {laps[0]['lap']['lap_number']} {lap_time_text(times[0])} vs "
+            f"{names[1]} lap {laps[1]['lap']['lap_number']} {lap_time_text(times[1])} "
+            f"(gap {times[1] - times[0]:+.3f} s)")
+
+
+def main(year, place, session_name, name_a, name_b):
+    import fastf1
+
+    fastf1.set_log_level("ERROR")
+    run = load_and_compare(year, place, session_name, name_a, name_b)
+    laps, times, result = run["laps"], run["times"], run["result"]
+
+    print(title_text(run, (name_a, name_b)))
+    if run["rain"]:
         print("NOTE: rain fell during this session. Wet laps vary more, so read everything with extra caution.")
     if all(lap["telemetry"]["DRS"].isna().all() for lap in laps):
         print("NOTE: no DRS/active-aero channel in this data, so straight-line findings can't separate "

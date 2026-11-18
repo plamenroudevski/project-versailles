@@ -227,11 +227,15 @@ def load_lap(session, acronym, lap_number=None):
 
 
 def get_corners(year, circuit_key):
-    """Return corner markers (X, Y, Number, Letter) for a circuit, from MultiViewer."""
+    """Return corner markers for a circuit, from MultiViewer.
+
+    Columns: X, Y (map position), Number, Letter (e.g. 2 and "A" for T2A) and
+    Angle (degrees, the direction to place the corner's label on a map).
+    """
     circuit = get_circuit_info(year=year, circuit_key=circuit_key)
     if circuit is None or circuit.corners.empty:
         raise LookupError("No corner positions for this circuit, so the lap can't be split into corners.")
-    return circuit.corners[["X", "Y", "Number", "Letter"]]
+    return circuit.corners[["X", "Y", "Number", "Letter", "Angle"]]
 
 
 def session_had_rain(session_key):

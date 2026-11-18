@@ -114,6 +114,16 @@ def test_zone_split_by_hand():
     ]
 
 
+def test_mini_sectors_go_to_the_faster_car():
+    # A is faster everywhere, so A (0) wins every mini-sector; swap the laps and B (1) does.
+    tel_fast, time_fast = simulate_lap(lambda d: 180.0)
+    tel_slow, time_slow = simulate_lap(lambda d: 144.0)
+    a, _, delta = analysis.align_laps(tel_fast, time_fast, tel_slow, time_slow)
+    assert {winner for _, _, winner in analysis.mini_sector_winners(a, delta, count=10)} == {0}
+    a, _, delta = analysis.align_laps(tel_slow, time_slow, tel_fast, time_fast)
+    assert {winner for _, _, winner in analysis.mini_sector_winners(a, delta, count=10)} == {1}
+
+
 @pytest.mark.parametrize("entry_loss, exit_loss, min_deficit, exit_deficit, expected", [
     (0.05, 0.01, 0, 0, "Braking"),        # most of the time lost before the apex
     (0.01, 0.05, 6, 6, "Mid-corner"),     # slower at the apex; the gap is carried, not grown, to the exit
