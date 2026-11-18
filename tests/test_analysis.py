@@ -133,6 +133,20 @@ def test_corner_cause(entry_loss, exit_loss, min_deficit, exit_deficit, expected
     assert analysis.classify_corner_cause(entry_loss, exit_loss, min_deficit, exit_deficit) == expected
 
 
+def fast_corner(time):
+    """A measured corner zone, as driver_vs_car sees it: just the gap and min speeds (200 km/h: not slow)."""
+    return {"kind": "corner", "time": time, "a": {"min_speed": 200.0}, "b": {"min_speed": 200.0}}
+
+
+def test_driver_vs_car_mixed_versus_one_sided():
+    # 5 corners to A, 9 to B: the gap swings both ways, which points to driving.
+    mixed = [fast_corner(0.05)] * 5 + [fast_corner(-0.05)] * 9
+    assert "swings both ways" in analysis.driver_vs_car(mixed, ("A", "B"))[0]
+    # 1 corner to A, 11 to B: a one-sided pattern; A is the slower driver.
+    one_sided = [fast_corner(0.05)] + [fast_corner(-0.05)] * 11
+    assert analysis.driver_vs_car(one_sided, ("A", "B"))[0].startswith("A is slower in 11 of the 12 corners")
+
+
 def test_earlier_braking_is_found_end_to_end():
     # B brakes 20 m earlier into the only corner and is otherwise identical.
     tel_a, time_a = corner_lap(brake_from=600)

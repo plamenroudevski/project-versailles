@@ -1,0 +1,13 @@
+# Streamlit settings for this app (read when you run `streamlit run app.py` from this folder).
+
+[theme]
+base = "dark"
+backgroundColor = "#0E1117"           # same as charts.BACKGROUND, so the charts blend into the page
+secondaryBackgroundColor = "#1A1F29"  # sidebar and input boxes: one step lighter, same cool tone
+textColor = "#FAFAFA"                 # same as charts.TEXT (Streamlit's default dark text is warm-tinted)
+
+[client]
+toolbarMode = "minimal"      # hide the developer menu and Deploy button
+
+[browser]
+gatherUsageStats = false     # don't send anonymous usage statistics to Streamlit

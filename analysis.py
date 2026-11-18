@@ -100,6 +100,11 @@ PATTERN_MIN_ZONES = 2
 PATTERN_MIN_TIME_S = 0.01
 # Zone gaps smaller than this count as "level" in the car/driver read.
 
+PATTERN_MIXED_SHARE = 0.25
+# The corner gap only "swings both ways" if the less successful driver is
+# quicker in at least this share of the corners with a clear gap. 11 corners
+# to 1 is a pattern, not a swing.
+
 MINI_SECTORS = 25
 # The track map is cut into this many equal-length pieces, each coloured by
 # the faster driver. ~170 m each on a 4.3 km lap: short enough to show where
@@ -559,14 +564,16 @@ def driver_vs_car(results, names):
 
     a_quicker = sum(z["time"] > PATTERN_MIN_TIME_S for z in corners)
     b_quicker = sum(z["time"] < -PATTERN_MIN_TIME_S for z in corners)
-    if a_quicker and b_quicker:
+    clear = a_quicker + b_quicker
+    if clear >= PATTERN_MIN_ZONES and min(a_quicker, b_quicker) >= PATTERN_MIXED_SHARE * clear:
         lines.append(f"Corner by corner the gap swings both ways ({names[0]} quicker in {a_quicker}, "
                      f"{names[1]} in {b_quicker} of {len(corners)} corners): telemetry suggests the corner "
                      f"differences come mostly from driving (lines, braking, commitment) rather than the car.")
-    elif a_quicker + b_quicker >= PATTERN_MIN_ZONES:
-        who = names[1] if a_quicker else names[0]
-        lines.append(f"{who} is slower in every corner where there's a clear gap: that could be the car's "
-                     f"overall grip or a consistent driving difference, and one lap can't separate them.")
+    elif clear >= PATTERN_MIN_ZONES:
+        who = names[1] if a_quicker > b_quicker else names[0]
+        lines.append(f"{who} is slower in {max(a_quicker, b_quicker)} of the {clear} corners with a clear gap: "
+                     f"that could be the car's overall grip or a consistent driving difference, and one lap "
+                     f"can't separate them.")
     return lines or ["No clear pattern: the gaps are too small or too few to read."]
 
 
@@ -633,19 +640,19 @@ def print_zone_table(table, names):
         print(shown.to_string(index=False))
 
 
-def load_and_compare(year, place, session_name, name_a, name_b):
-    """Download a session and compare two drivers' fastest valid laps.
+def load_and_compare(session, name_a, name_b, lap_a=None, lap_b=None):
+    """Download two drivers' laps from a session and compare them.
 
-    Used by the terminal scripts (this file and charts.py). The app calls the
-    data.py steps itself, so it can cache each one. Returns a dict with the
-    session, both laps (from data.load_lap), the raw corner markers, the lap
-    times, whether it rained, and the compare() result.
+    `session` is a row from data.find_session or data.get_session. Each
+    driver's fastest valid lap is used unless a lap number is given. Used by
+    the terminal scripts and the app. Returns a dict with the session, both
+    laps (from data.load_lap), the raw corner markers, the lap times, whether
+    it rained, and the compare() result.
     """
     import data  # imported here so the rest of this file never needs the internet
 
-    session = data.find_session(year, place, session_name)
-    laps = [data.load_lap(session, name) for name in (name_a, name_b)]
-    corners = data.get_corners(year, int(session["circuit_key"]))
+    laps = [data.load_lap(session, name, lap) for name, lap in ((name_a, lap_a), (name_b, lap_b))]
+    corners = data.get_corners(int(session["year"]), int(session["circuit_key"]))
     times = [float(lap["lap"]["lap_duration"]) for lap in laps]
     result = compare(laps[0]["telemetry"], times[0], laps[1]["telemetry"], times[1], corners, (name_a, name_b))
     return {"session": session, "laps": laps, "corners": corners, "times": times,
@@ -664,8 +671,10 @@ def title_text(run, names):
 def main(year, place, session_name, name_a, name_b):
     import fastf1
 
+    import data
+
     fastf1.set_log_level("ERROR")
-    run = load_and_compare(year, place, session_name, name_a, name_b)
+    run = load_and_compare(data.find_session(year, place, session_name), name_a, name_b)
     laps, times, result = run["laps"], run["times"], run["result"]
 
     print(title_text(run, (name_a, name_b)))

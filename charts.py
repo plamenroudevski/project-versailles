@@ -223,9 +223,11 @@ def track_map_figure(result, corners, names, colours, title=""):
 def main(year, place, session_name, name_a, name_b):
     import fastf1
 
+    import data
+
     fastf1.set_log_level("ERROR")
     names = (name_a, name_b)
-    run = analysis.load_and_compare(year, place, session_name, name_a, name_b)
+    run = analysis.load_and_compare(data.find_session(year, place, session_name), name_a, name_b)
     drivers = [lap["driver"] for lap in run["laps"]]
     colours = driver_colours([d["team_colour"] for d in drivers], [d["team_name"] for d in drivers])
     title = analysis.title_text(run, names)

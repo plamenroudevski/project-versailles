@@ -87,6 +87,59 @@ def find_session(year, place, session_name):
     return matches.iloc[0]
 
 
+def get_session(session_key):
+    """One session's details (the same kind of row find_session returns), by its OpenF1 key."""
+    sessions = openf1("sessions", session_key=session_key)
+    if sessions.empty:
+        raise LookupError("OpenF1 doesn't know this session.")
+    return sessions.iloc[0]
+
+
+def started(table):
+    """Keep only rows whose date_start is in the past: future sessions have no data yet."""
+    return table[pd.to_datetime(table["date_start"], format="ISO8601") <= pd.Timestamp.now(tz="UTC")]
+
+
+def list_events(year):
+    """A season's events (OpenF1 calls them meetings) that have started, newest first.
+
+    Columns include meeting_key, meeting_name, location and date_start.
+    """
+    meetings = openf1("meetings", year=year)
+    if meetings.empty:
+        return meetings
+    return started(meetings).sort_values("date_start", ascending=False).reset_index(drop=True)
+
+
+def list_sessions(meeting_key):
+    """An event's sessions that have started and weren't cancelled, in running order."""
+    sessions = openf1("sessions", meeting_key=meeting_key)
+    if sessions.empty:
+        return sessions
+    if "is_cancelled" in sessions:
+        sessions = sessions[sessions["is_cancelled"] != True]  # noqa: E712 (the column can also hold None)
+    return started(sessions).sort_values("date_start").reset_index(drop=True)
+
+
+def list_drivers(session):
+    """Everyone in a session with their fastest valid lap, fastest first.
+
+    Columns include driver_number, name_acronym, full_name, team_name,
+    team_colour and best_lap (seconds; empty if they set no valid time).
+    """
+    drivers = openf1("drivers", session_key=int(session["session_key"]))
+    if drivers.empty:
+        return drivers
+    drivers = drivers.drop_duplicates("driver_number").copy()
+    best = []
+    for _, driver in drivers.iterrows():
+        laps = get_laps(session, driver)
+        lap = None if laps.empty else fastest_lap(laps)
+        best.append(np.nan if lap is None else float(lap["lap_duration"]))
+    drivers["best_lap"] = best
+    return drivers.sort_values("best_lap", na_position="last").reset_index(drop=True)
+
+
 def get_driver(session_key, acronym):
     """Return one driver's entry (number, team, team colour) for a session."""
     drivers = openf1("drivers", session_key=session_key, name_acronym=acronym)
@@ -132,11 +185,16 @@ def get_laps(session, driver):
     """Return a driver's timed laps, sorted by lap number, with a `deleted` column.
 
     `session` is the row returned by find_session (it holds the time-zone offset).
+    The whole session's laps are fetched in one request and filtered here, so
+    listing 20 drivers costs one request (then cached), not 20.
     """
-    laps = openf1("laps", session_key=int(session["session_key"]), driver_number=int(driver["driver_number"]))
+    laps = openf1("laps", session_key=int(session["session_key"]))
     if laps.empty:
         return laps
+    laps = laps[laps["driver_number"] == int(driver["driver_number"])]
     laps = laps.dropna(subset=["lap_duration", "date_start"]).copy()
+    if laps.empty:
+        return laps
     control = openf1("race_control", session_key=int(session["session_key"]))
     laps["deleted"] = False
     if not control.empty:
