@@ -4,20 +4,22 @@ table, a ranked list of findings and a driver-vs-car read.
 
 Pipeline position:  data.py -> analysis.py -> charts.py -> app.py
 
-Everything except main() is a pure function: tables in, tables out, no
-downloads and no Streamlit. That's what makes it testable with made-up laps
-(tests/test_analysis.py) and runnable from a terminal:
+The analysis itself is pure functions: tables in, tables out, no downloads
+and no Streamlit. That's what makes it testable with made-up laps
+(tests/test_analysis.py). The section at the bottom adds the download step
+(load_and_compare, via data.py) and terminal output, so it also runs alone:
 
     python analysis.py                                   # 2026 Brazil Qualifying, NOR vs RUS
     python analysis.py 2025 Monza Qualifying LEC HAM
 
 compare() runs the steps in order:
-    1. align_laps      put both laps on one distance grid; compute the time gap
-    2. locate_corners  turn corner map positions into distances along the lap
-    3. split_zones     cut the lap into corner zones and straights
-    4. measure_zones   per-zone metrics for each driver
-    5. rank_findings   biggest time differences, each with a likely cause
-    6. driver_vs_car   heuristic: do the deficits look like car or driver?
+    1. align_laps           put both laps on one distance grid; compute the time gap
+    2. locate_corners       turn corner map positions into distances along the lap
+    3. split_zones          cut the lap into corner zones and straights
+    4. measure_zones        per-zone metrics for each driver
+    5. rank_findings        biggest time differences, each with a likely cause
+    6. driver_vs_car        heuristic: do the deficits look like car or driver?
+    7. mini_sector_winners  faster driver per mini-sector, for the track map
 
 Sign convention everywhere: the gap is driver B's time minus driver A's.
 Positive = B is slower (losing time).
@@ -287,11 +289,12 @@ def split_zones(corner_table, a, b):
 def corner_metrics(lap, start, end):
     """One driver's numbers for one corner zone.
 
-    brake_point    where braking starts (m). Empty if the driver doesn't
-                   brake, or is already braking when the zone starts.
+    brake_point    where braking starts (m). NaN ("not a number", i.e. no
+                   value) if the driver doesn't brake, or is already braking
+                   when the zone starts.
     min_speed      slowest point of the corner (km/h); apex = where it is (m)
     gear_at_min    gear at the slowest point
-    full_throttle  where throttle is back to full after the apex (m); empty if
+    full_throttle  where throttle is back to full after the apex (m); NaN if
                    not within the zone
     exit_speed     speed at the end of the zone (km/h)
     """
@@ -337,11 +340,12 @@ def straight_metrics(lap, start, end):
     result = {"entry_speed": z["Speed"].iloc[0], "top_speed": z["Speed"].max(), "deployment": None, "speed_loss": 0.0}
 
     # The flat-out run: the last unbroken stretch at full throttle, off the brake.
-    flat_out = ((z["Throttle"] >= FULL_THROTTLE_PCT) & ~z["Brake"]).to_numpy()
-    if not flat_out.any():
+    # np.flatnonzero gives the positions of the True values.
+    flat = flat_out(z).to_numpy()
+    if not flat.any():
         return result
-    run_end = np.flatnonzero(flat_out)[-1]
-    lifts = np.flatnonzero(~flat_out[:run_end])
+    run_end = np.flatnonzero(flat)[-1]      # last flat-out sample
+    lifts = np.flatnonzero(~flat[:run_end])  # samples before it that weren't flat out
     run = z.iloc[(lifts[-1] + 1 if len(lifts) else 0): run_end + 1]
     if run["Distance"].iloc[-1] - run["Distance"].iloc[0] < DEPLOY_MIN_RUN_M:
         return result
@@ -373,6 +377,7 @@ def measure_zones(a, b, delta, zones):
 
     results = []
     for i, zone in enumerate(zones):
+        # dict(zone, time=...) makes a copy of the zone with a "time" entry added.
         z = dict(zone, time=gap_at(zone["end"]) - gap_at(zone["start"]))
         if zone["kind"] == "corner":
             z["a"] = corner_metrics(a, zone["start"], zone["end"])
@@ -614,7 +619,9 @@ def compare(tel_a, lap_time_a, tel_b, lap_time_b, corners, names):
 
 
 # ----------------------------------------------------------------------------
-# Terminal entry point: everything below only runs with `python analysis.py`.
+# Loading and text output. load_and_compare() downloads (through data.py);
+# the app uses it, title_text() and lap_time_text() too. main() is what
+# `python analysis.py` runs.
 # ----------------------------------------------------------------------------
 
 def lap_time_text(seconds):

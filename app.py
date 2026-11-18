@@ -17,7 +17,7 @@ re-download everything each time. So the functions that fetch or compute are
 wrapped in `@st.cache_data`. That line is a decorator: it wraps the function
 below it with extra behaviour, here "remember the answer for each set of
 inputs". A re-run with the same inputs gets the remembered answer instantly.
-Under that, data.py's FastF1 disk cache keeps raw downloads for 12 hours.
+Under that, data.py's FastF1 disk cache keeps raw downloads for 10 minutes.
 """
 
 import re
@@ -32,9 +32,9 @@ import analysis
 import charts
 import data
 
-CACHE_TTL_S = 3600
-# Remembered answers expire after an hour, so new sessions and late-arriving
-# data appear during a race weekend without restarting the app.
+CACHE_TTL_S = 600
+# Remembered answers expire after 10 minutes (like data.CACHE_EXPIRY_S), so a
+# session opened while OpenF1 is still filling it in corrects itself soon after.
 
 FIRST_YEAR = 2023  # OpenF1 has no data before 2023
 
@@ -129,7 +129,7 @@ try:
     field = drivers(session_key)
     if field.empty or field["best_lap"].notna().sum() < 2:
         stop("Fewer than two drivers have a valid lap time in this session so far. If it has only just "
-             "finished, OpenF1 may still be processing it: try again in a few minutes.")
+             "finished, OpenF1 may still be processing it: try again in about 10 minutes.")
 
     # Drivers are listed fastest first, so the default compares the two quickest.
     driver_labels = {d.name_acronym: f"{d.name_acronym} · {d.full_name} · "

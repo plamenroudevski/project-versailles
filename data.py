@@ -14,9 +14,9 @@ Sources:
   paid F1 TV login, which is why telemetry comes from OpenF1.)
 
 Caching: every web request goes through FastF1's disk cache, a small database
-in FastF1's cache folder. The same request within 12 hours is answered from
-disk: instant, works offline, and doesn't use up OpenF1's rate limit.
-The app adds Streamlit's in-memory cache on top of this.
+in FastF1's cache folder. The same OpenF1 request within CACHE_EXPIRY_S (10
+minutes) is answered from disk: instant, and doesn't use up OpenF1's rate
+limit. The app adds Streamlit's in-memory cache on top of this.
 
 Your notes: plain Markdown files in notes/, one per session and driver pair,
 so you can write them in Obsidian and commit them with the code. No database.
@@ -42,6 +42,12 @@ API = "https://api.openf1.org/v1"
 # per-second limit), then long enough to clear the per-minute one (~1 min total).
 RETRY_WAITS_S = (2, 5, 15, 40)
 
+# How long a downloaded OpenF1 answer is reused from disk. Kept short because a
+# session that has only just finished may still be filling in on OpenF1, and a
+# half-finished answer mustn't stick for hours. Still long enough to absorb
+# bursts (listing 20 drivers reads the same laps answer 20 times).
+CACHE_EXPIRY_S = 600
+
 # Seconds of telemetry fetched either side of a lap. Samples arrive every
 # ~0.25 s and never land exactly on the start/finish line, so the padding
 # gives us samples on both sides of the line to interpolate between.
@@ -58,13 +64,19 @@ DELETED_LAP = re.compile(r"\((?P<driver>[A-Z]{3})\).*\bDELETED\b.*\b(?P<clock>\d
 def openf1(endpoint, **params):
     """Fetch one OpenF1 endpoint as a table (a pandas DataFrame).
 
+    `**params` collects any keyword arguments into a dict, which become the
+    URL's filters: openf1("laps", session_key=11408) asks for
+    .../laps?session_key=11408.
+
     OpenF1 answers "404 No results found" when a filter matches nothing, so
     that becomes an empty table rather than an error. "429 Too Many Requests"
     is retried after a pause (see RETRY_WAITS_S). Any other failure (network
     down, server error) raises an exception with the reason.
     """
+    # One try per wait in RETRY_WAITS_S, plus a last try (None: don't wait again, give up).
     for wait_s in (*RETRY_WAITS_S, None):
-        response = fastf1.Cache.requests_get(f"{API}/{endpoint}", params=params, timeout=60)
+        response = fastf1.Cache.requests_get(f"{API}/{endpoint}", params=params, timeout=60,
+                                             expire_after=CACHE_EXPIRY_S)
         if response.status_code != 429 or wait_s is None:
             break
         time.sleep(wait_s)
@@ -160,8 +172,8 @@ def deleted_laps(control, laps, acronym, gmt_offset):
     be picked as a driver's fastest lap.
 
     Race control's own "LAP n" doesn't always match OpenF1's lap numbers (in
-    2026 Brazil it was one higher, after the delayed start), so we use the
-    incident's clock time instead and find the lap being driven at that moment.
+    2026 Brazil qualifying it was one higher), so we use the incident's clock
+    time instead and find the lap being driven at that moment.
 
     control:    race-control messages (columns `date` in UTC and `message`)
     laps:       the driver's timed laps (`lap_number`, `date_start`, `lap_duration`)
@@ -189,8 +201,8 @@ def deleted_laps(control, laps, acronym, gmt_offset):
 def get_laps(session, driver):
     """Return a driver's timed laps, sorted by lap number, with a `deleted` column.
 
-    `session` is the row returned by find_session (it holds the time-zone offset).
-    The whole session's laps are fetched in one request and filtered here, so
+    `session` is a row from find_session or get_session (it holds the time-zone
+    offset). The whole session's laps are fetched in one request and filtered here, so
     listing 20 drivers costs one request (then cached), not 20.
     """
     laps = openf1("laps", session_key=int(session["session_key"]))
@@ -267,7 +279,7 @@ def get_lap_telemetry(session_key, driver_number, lap):
 def load_lap(session, acronym, lap_number=None):
     """Everything about one driver's lap: entry, all laps, the chosen lap, its telemetry.
 
-    `session` is the row returned by find_session. Uses the driver's fastest
+    `session` is a row from find_session or get_session. Uses the driver's fastest
     valid lap unless `lap_number` is given. Returns a dict so callers can pick
     what they need.
     """

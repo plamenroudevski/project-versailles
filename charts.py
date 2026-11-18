@@ -37,6 +37,7 @@ GRID = "#262730"        # faint horizontal gridlines only
 FONT_SIZE = 15
 LABEL_OFFSET = 350      # corner labels sit this far off the track (map units of 0.1 m, so 35 m);
                         # further out, they land on nearby track at tight circuits like Interlagos
+LABEL_GAP_M = 150       # corner labels closer than this along the lap are staggered on two heights
 
 FALLBACK_COLOURS = ("#E69F00", "#56B4E9")
 # Okabe-Ito orange and sky blue: told apart with the common forms of colour
@@ -162,15 +163,20 @@ def telemetry_figure(result, names, colours, title=""):
     fig.add_trace(go.Scatter(x=a["Distance"], y=delta, name="Gap", showlegend=False,
                              line=dict(color=TEXT, width=2), hovertemplate="%{y:+.3f} s"), row=2, col=1)
 
-    # Numbered corner markers: a faint line through every row, the label above the speed trace.
+    # Numbered corner markers: a faint line through every row, the label above
+    # the speed trace. A label closer than LABEL_GAP_M to the previous one goes
+    # on the other of two heights, so clusters (T6-T9 at Interlagos) stay readable.
+    height_row, previous = 0, -np.inf
     for label, distance in zip(result["corners"]["Label"], result["corners"]["Distance"]):
+        height_row = 1 - height_row if distance - previous < LABEL_GAP_M else 0
+        previous = distance
         fig.add_shape(type="line", x0=distance, x1=distance, xref="x", y0=0, y1=1, yref="paper",
                       line=dict(color=GRID, width=1, dash="dot"), layer="below")
         fig.add_annotation(x=distance, xref="x", y=1.0, yref="y domain", yanchor="bottom", text=label,
-                           showarrow=False, font=dict(color=MUTED, size=FONT_SIZE - 3))
+                           yshift=15 * height_row, showarrow=False, font=dict(color=MUTED, size=FONT_SIZE - 3))
 
     style(fig, title, height=950)
-    fig.update_layout(hovermode="x unified", legend=dict(y=1.04))  # legend up on the title row, clear of the corner labels
+    fig.update_layout(hovermode="x unified", legend=dict(y=1.06))  # legend above both rows of corner labels
     for row, (axis_title, _) in enumerate(ROWS, start=1):
         fig.update_yaxes(title=dict(text=axis_title, font=dict(size=FONT_SIZE)), row=row, col=1)
     fig.update_yaxes(title=dict(text=f"Gap (s)<br>+ = {names[1]} behind"), zeroline=True,
