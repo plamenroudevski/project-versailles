@@ -52,7 +52,9 @@ RETRY_WAITS_S = (2, 5, 15, 40)
 CACHE_EXPIRY_S = 600
 
 # One shared download session, caching to openf1.sqlite in the system's temp folder.
-HTTP = requests_cache.CachedSession("openf1", use_temp=True, expire_after=CACHE_EXPIRY_S)
+# stale_if_error: if a download fails (OpenF1 down, or a 429/5xx) and an expired copy
+# is on disk, use that copy instead of failing. With no copy, errors pass through as before.
+HTTP = requests_cache.CachedSession("openf1", use_temp=True, expire_after=CACHE_EXPIRY_S, stale_if_error=True)
 
 # Seconds of telemetry fetched either side of a lap. Samples arrive every
 # ~0.25 s and never land exactly on the start/finish line, so the padding
@@ -111,7 +113,9 @@ def find_session(year, place, session_name):
     matches = sessions[names.str.contains(place, case=False, regex=False)]
     if matches.empty:
         raise LookupError(f"No {year} {session_name} at '{place}'. Try one of: {', '.join(sessions['location'])}.")
-    if len(matches) > 1:  # e.g. "United States" in 2026: Miami, Austin and Las Vegas
+    # Different places matched, e.g. "United States" in 2026: Miami, Austin and Las Vegas.
+    # Two events at the same place (2026's two Bahrain tests) keep the first, as a city can't split them.
+    if matches["location"].nunique() > 1:
         raise LookupError(f"'{place}' matches several {year} events ({', '.join(matches['location'])}). "
                           f"Use the city instead.")
     return matches.iloc[0]

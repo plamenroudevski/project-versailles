@@ -12,6 +12,17 @@ import pytest
 import data
 
 
+def test_find_session_with_several_matches(monkeypatch):
+    # monkeypatch swaps data.openf1 for a stand-in during this test, so no internet is needed.
+    sessions = pd.DataFrame({"session_key": [1, 2, 3, 4], "country_name": ["Bahrain", "Bahrain", "United States",
+                             "United States"], "location": ["Bahrain", "Bahrain", "Miami Gardens", "Austin"],
+                             "circuit_short_name": ["Sakhir", "Sakhir", "Miami", "Austin"]})
+    monkeypatch.setattr(data, "openf1", lambda endpoint, **params: sessions)
+    assert data.find_session(2026, "Bahrain", "Day 1")["session_key"] == 1  # same place twice: the first one
+    with pytest.raises(LookupError, match="Miami Gardens, Austin"):
+        data.find_session(2026, "United States", "Day 1")                     # different places: ask for the city
+
+
 def test_build_telemetry_distance_starts_at_the_line():
     # A car at a steady 180 km/h (50 m/s): car data every 0.25 s from 0.9 s before the line,
     # position at different moments, moving 500 map units (50 m) per second along x.
