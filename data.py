@@ -210,8 +210,11 @@ def deleted_laps(control, laps, acronym, gmt_offset):
         incident = incident_local - gmt_offset
         deleted.update(laps.loc[(starts <= incident) & (incident < ends), "lap_number"])
 
-    # shortcut: a reinstatement always wins, even if the lap were deleted again
-    # afterwards (not seen in 2025-2026 data); compare publish times if that ever happens.
+    # shortcut: only "TIME m:ss.sss ... REINSTATED" is understood (9 of the 10 such
+    # messages in 2025-26). "LAP 1 WILL BE REINSTATED" (Monza 2026 race) isn't, because
+    # race control's lap numbers can be off by one; lap 1 is never a fastest lap, so
+    # revisit only if a qualifying lap is announced that way. A reinstatement also
+    # always wins, even if the lap were deleted again later (not seen in 2025-26).
     back = control["message"].str.extract(REINSTATED_LAP)
     for minutes, seconds in back.loc[back["driver"] == acronym, ["minutes", "seconds"]].itertuples(index=False):
         lap_time = int(minutes) * 60 + float(seconds)
