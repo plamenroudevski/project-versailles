@@ -27,6 +27,7 @@ Each file only talks to the one before it. `analysis.py` has no downloads and no
 - **Why OpenF1, not FastF1's loader:** F1's live-timing archive, which FastF1 reads, now returns *401 Unauthorized* without a paid F1 TV login. OpenF1 serves the same ~4 Hz car data for free, from 2023 onwards. FastF1 is still used for corner positions (from MultiViewer).
 - **Channels:** speed, throttle (0–100 %), brake (**on/off only**), gear, RPM, plus X/Y position. For 2026 cars, **DRS is empty**, because active aero replaced it and isn't in the feed.
 - **Deleted laps:** race control posts text such as `CAR 18 (STR) TIME 1:42.680 DELETED ... LAP 4 16:29:11`. Its "LAP 4" was OpenF1's lap 3, an off-by-one in this session. So the code ignores lap numbers and uses the **incident's clock time** (16:29:11 local → UTC) to find the lap being driven at that moment. It also handles sessions that run past midnight. A lap given back after review (`CAR 44 (HAM) TIME 1:20.755 WILL BE REINSTATED`) names its lap time instead of a clock time, so it's matched by lap time and counts again.
+- **Qualifying parts (Q1/Q2/Q3):** race control tags every message with its part and posts "SESSION STARTED" as each part begins, and again after a red flag. Each lap gets the part that most recently started before the lap began. Gaps between laps would be fooled by red flags: 2026 São Paulo's Q1 was red-flagged two minutes in and restarted 84 minutes later. It matters for analysis because the track changes between parts. Russell's fastest lap was in Q2, Norris's in Q3, and Q3 against Q3, Norris was 0.204 s quicker.
 - **Rate limits and caching:** OpenF1's free tier allows 3 requests/s and 30/min. A "429 Too Many Requests" reply is retried after 2, 5, 15, then 40 s. Answers are cached on disk for 10 minutes with requests-cache (the library FastF1's own cache is built on): short enough that a just-finished session corrects itself, long enough to absorb bursts. FastF1's request helper isn't used for OpenF1 because it has a hidden cap of 500 downloads per hour, shared by every visitor of the hosted app, and raises an error past it (found in an audit).
 
 ### Building the telemetry table
@@ -91,7 +92,7 @@ Zones are ranked by time lost (≥ 0.02 s, top 5). For a corner, the loss is spl
 ## 7. Charts and app
 
 - **One Plotly figure with five rows sharing an x-axis.** That's the only way zoom stays in sync, because separate Streamlit charts can't talk to each other.
-- **Brake lanes:** on/off signals for two drivers would hide each other as lines, so each driver gets a lane with bars.
+- **Brake lanes:** on/off signals for two drivers would hide each other as lines, so each driver gets a lane with bars. OpenF1's brake channel is only 0 or 100 (no pressure), so there's no brake % to show. The bars have gaps, and Plotly's hover borrowed the nearest bar point a few metres away, reporting "braking" for a driver who hadn't braked yet. So an invisible line with a value at every metre carries the hover ("brake on/off") instead.
 - **Colours:** team colours unless they look too alike or too dark. "Alike" is measured as a perceptual colour difference (CIE Lab ΔE ≥ 30) for normal vision *and* simulated deuteranopia. "Too dark" means WCAG contrast below 3:1 against the background. Otherwise a colour-blind-safe orange/blue pair is used.
 - **Streamlit re-runs the whole script** on every click. `@st.cache_data` remembers results per input for 10 minutes, so re-runs are instant.
 - **Notes:** plain Markdown in `notes/`, named by session and sorted driver pair. The create button only appears on localhost, because the hosted app's disk is wiped on restart.
@@ -126,6 +127,7 @@ Zones are ranked by time lost (≥ 0.02 s, top 5). For a corner, the loss is spl
 - **How accurate is a braking point?** About ±half a sample gap: ±10 m at 300 km/h. Hence the 15 m reporting threshold.
 - **How do you know the delta is right?** It ends at exactly the official lap-time gap, the zones sum to it, and a synthetic test checks it against hand calculation.
 - **Why might "time lost on a straight" mislead?** It's mostly exit speed carried from the previous corner. Judge the car on top speed and on the speed *shape* at full throttle.
+- **Why not split Q1/Q2/Q3 by the gaps between laps?** Red flags make gaps too (an 84-minute one inside Q1 in São Paulo). Race control's own part markers are exact.
 - **What would you add with more data?** Brake pressure for trail-braking, steering angle for understeer vs oversteer, energy state for 2026 deployment, and several laps per driver to separate repeatable traits from one-offs.
 - **What surprised you?** F1 put its timing archive behind a login, race control's lap numbers were off by one, and in the wet nobody reached full throttle in some corners, so throttle-point metrics went blank and I needed a fallback.
 

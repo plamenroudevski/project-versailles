@@ -672,11 +672,16 @@ def load_and_compare(session, name_a, name_b, lap_a=None, lap_b=None):
 
 
 def title_text(run, names):
-    """One-line heading, e.g. '2026 São Paulo Qualifying: NOR lap 23 1:27.470 vs RUS lap 18 1:26.745 (gap -0.725 s)'."""
+    """One-line heading, e.g.
+    '2026 São Paulo Qualifying: NOR lap 23 (Q3) 1:27.470 vs RUS lap 18 (Q2) 1:26.745 (gap -0.725 s)'.
+    The qualifying part shows when laps come from different parts of the session.
+    """
     session, laps, times = run["session"], run["laps"], run["times"]
+    labels = [f"lap {lap['lap']['lap_number']}" + (f" ({lap['lap'].get('part')})" if lap["lap"].get("part") else "")
+              for lap in laps]
     return (f"{session['year']} {session['location']} {session['session_name']}: "
-            f"{names[0]} lap {laps[0]['lap']['lap_number']} {lap_time_text(times[0])} vs "
-            f"{names[1]} lap {laps[1]['lap']['lap_number']} {lap_time_text(times[1])} "
+            f"{names[0]} {labels[0]} {lap_time_text(times[0])} vs "
+            f"{names[1]} {labels[1]} {lap_time_text(times[1])} "
             f"(gap {times[1] - times[0]:+.3f} s)")
 
 

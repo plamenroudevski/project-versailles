@@ -61,6 +61,11 @@ def drivers(session_key):
 
 
 @st.cache_data(ttl=CACHE_TTL_S, show_spinner=False)
+def parts(session_key):
+    return data.list_parts(data.get_session(session_key))
+
+
+@st.cache_data(ttl=CACHE_TTL_S, show_spinner=False)
 def laps(session_key, acronym):
     return data.get_laps(data.get_session(session_key), data.get_driver(session_key, acronym))
 
@@ -91,19 +96,34 @@ def running_locally():
 
 def lap_label(lap):
     label = f"Lap {lap.lap_number} · {analysis.lap_time_text(lap.lap_duration)}"
+    if lap.part:
+        label = f"{lap.part} · {label}"
     return f"{label} (deleted)" if lap.deleted else label
 
 
-def lap_picker(session_key, acronym):
-    """Lap choice for one driver: their fastest valid lap unless another is picked."""
+def lap_picker(session_key, acronym, part):
+    """Lap choice for one driver: their fastest valid lap (within `part`, if one is picked) unless another is picked.
+
+    Returns a lap number, or None for the fastest lap of the whole session.
+    """
     driver_laps = laps(session_key, acronym)
+    if part and not driver_laps.empty:
+        driver_laps = driver_laps[driver_laps["part"] == part]
+        if driver_laps.empty:
+            stop(f"{acronym} didn't set a lap time in {part}.")
     if driver_laps.empty:
         return None
-    labels = {None: "Fastest valid lap"}
+    labels = {None: f"Fastest valid lap in {part}" if part else "Fastest valid lap"}
     labels.update({int(lap.lap_number): lap_label(lap) for lap in driver_laps.itertuples()})
-    # The key ties the choice to this session and driver, so it resets when either changes.
-    return st.sidebar.selectbox(f"{acronym} lap", list(labels), format_func=labels.get,
-                                key=f"lap-{session_key}-{acronym}")
+    # The key ties the choice to this session, driver and part, so it resets when any changes.
+    choice = st.sidebar.selectbox(f"{acronym} lap", list(labels), format_func=labels.get,
+                                  key=f"lap-{session_key}-{acronym}-{part}")
+    if choice is None and part:
+        fastest = data.fastest_lap(driver_laps)
+        if fastest is None:
+            stop(f"All of {acronym}'s lap times in {part} were deleted.")
+        return int(fastest["lap_number"])
+    return choice
 
 
 # ---- Sidebar: what to compare --------------------------------------------------------
@@ -127,6 +147,11 @@ try:
     names = list(session_labels.values())
     default = names.index("Qualifying") if "Qualifying" in names else len(names) - 1
     session_key = st.sidebar.selectbox("Session", list(session_labels), index=default, format_func=session_labels.get)
+    # Qualifying only: compare laps from the same part (Q1, Q2 or Q3), as the track changes between them.
+    session_parts = parts(session_key)
+    part = None
+    if session_parts:
+        part = st.sidebar.selectbox("Part", [None, *session_parts], format_func=lambda p: p or "Whole session")
 
     field = drivers(session_key)
     if field.empty or field["best_lap"].notna().sum() < 2:
@@ -142,8 +167,8 @@ try:
     name_b = st.sidebar.selectbox("Driver B", acronyms, index=1, format_func=driver_labels.get)
     if name_a == name_b:
         stop("Pick two different drivers.")
-    lap_a = lap_picker(session_key, name_a)
-    lap_b = lap_picker(session_key, name_b)
+    lap_a = lap_picker(session_key, name_a, part)
+    lap_b = lap_picker(session_key, name_b, part)
 except requests.RequestException as error:
     stop(f"Couldn't reach OpenF1 ({error}). Try again in a minute.", st.error)
 st.sidebar.caption("Data: OpenF1 (2023 onwards). Corner positions: MultiViewer, via FastF1.")

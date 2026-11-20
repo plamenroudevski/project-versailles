@@ -226,12 +226,44 @@ def deleted_laps(control, laps, acronym, gmt_offset):
     return deleted
 
 
-def get_laps(session, driver):
-    """Return a driver's timed laps, sorted by lap number, with a `deleted` column.
+def part_starts(control, session_name):
+    """When each part of a qualifying session began (UTC), e.g. Q1 18:00, Q2 19:49, Q3 20:14.
 
-    `session` is a row from find_session or get_session (it holds the time-zone
-    offset). The whole session's laps are fetched in one request and filtered here, so
-    listing 20 drivers costs one request (then cached), not 20.
+    Empty for sessions without parts. Race control tags every message with its
+    part (qualifying_phase) and posts "SESSION STARTED" as a part begins, and
+    again after each red flag, so a part starts at its first one. Gaps between
+    laps can't do this reliably: in 2026 São Paulo, Q1 was red-flagged two
+    minutes in and only restarted 84 minutes later.
+    """
+    if "qualifying_phase" not in control:
+        return pd.Series(dtype=object)
+    began = control[(control["message"] == "SESSION STARTED") & control["qualifying_phase"].notna()]
+    starts = pd.to_datetime(began["date"], format="ISO8601").groupby(began["qualifying_phase"].astype(int)).min()
+    prefix = "SQ" if "Sprint" in session_name else "Q"  # sprint qualifying's parts are SQ1-SQ3
+    return starts.rename(index=lambda phase: f"{prefix}{phase}").sort_values()
+
+
+def lap_parts(laps, starts):
+    """Each lap's part (from part_starts): the last part to start before the lap began, or None."""
+    if starts.empty:
+        return [None] * len(laps)
+    position = starts.searchsorted(pd.to_datetime(laps["date_start"], format="ISO8601"), side="right") - 1
+    return [starts.index[i] if i >= 0 else None for i in position]
+
+
+def list_parts(session):
+    """A session's qualifying parts in order, e.g. ["Q1", "Q2", "Q3"]; empty for other sessions."""
+    control = openf1("race_control", session_key=int(session["session_key"]))
+    return [] if control.empty else part_starts(control, session["session_name"]).index.tolist()
+
+
+def get_laps(session, driver):
+    """Return a driver's timed laps, sorted by lap number, with `deleted` and `part` columns.
+
+    `part` is "Q1", "Q2" or "Q3" (SQ1-SQ3 in sprint qualifying), None in other
+    sessions. `session` is a row from find_session or get_session (it holds the
+    time-zone offset). The whole session's laps are fetched in one request and
+    filtered here, so listing 20 drivers costs one request (then cached), not 20.
     """
     laps = openf1("laps", session_key=int(session["session_key"]))
     if laps.empty:
@@ -242,9 +274,11 @@ def get_laps(session, driver):
         return laps
     control = openf1("race_control", session_key=int(session["session_key"]))
     laps["deleted"] = False
+    laps["part"] = None
     if not control.empty:
         gone = deleted_laps(control, laps, driver["name_acronym"], pd.to_timedelta(session["gmt_offset"]))
         laps["deleted"] = laps["lap_number"].isin(gone)
+        laps["part"] = lap_parts(laps, part_starts(control, session["session_name"]))
     return laps.sort_values("lap_number").reset_index(drop=True)
 
 

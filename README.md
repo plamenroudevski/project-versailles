@@ -8,7 +8,7 @@ Compares two drivers' qualifying laps from real F1 telemetry and shows **where**
 
 ## Example: Norris vs Russell, 2026 São Paulo Grand Prix qualifying
 
-Russell 1:26.745 (lap 18), Norris 1:27.470 (lap 23). Rain fell during the session.
+Russell 1:26.745 (lap 18, in Q2), Norris 1:27.470 (lap 23, in Q3). Rain fell during the session. Each driver's fastest lap of the session is the default, shown below; with the app's **Part** picker set to Q3, both laps come from the same part and Norris is 0.204 s quicker.
 
 ```
 1. [Traction/exit] NOR loses ~0.23 s at T9: up to 11 km/h slower after the apex.
@@ -29,7 +29,7 @@ A track map colours 25 mini-sectors by the faster driver. Each finding is reprod
 
 ## Method
 
-1. **Data.** Lap times, car telemetry (speed, throttle, brake, gear, RPM at ~4 Hz) and car position come from [OpenF1](https://openf1.org). Corner positions come from MultiViewer via [FastF1](https://github.com/theOehrly/Fast-F1). Laps deleted by race control are excluded from "fastest lap" (matched by the incident's clock time, because race control's lap numbers can disagree with the timing data), and count again if reinstated.
+1. **Data.** Lap times, car telemetry (speed, throttle, brake, gear, RPM at ~4 Hz) and car position come from [OpenF1](https://openf1.org). Corner positions come from MultiViewer via [FastF1](https://github.com/theOehrly/Fast-F1). Laps deleted by race control are excluded from "fastest lap" (matched by the incident's clock time, because race control's lap numbers can disagree with the timing data), and count again if reinstated. Qualifying laps are tagged Q1, Q2 or Q3 from race control's part markers, so laps can be compared within the same part as the track evolves.
 2. **Alignment.** Distance is speed integrated over time, which drifts a few metres per lap (4250 m vs 4241 m here). Both laps are stretched to a common length so each corner sits at the same metre for both drivers. Then each driver's elapsed time is interpolated onto a 1 m grid and subtracted. The gap is computed here, not with `fastf1.utils.delta_time`, and ends at exactly the lap-time difference.
 3. **Zones.** A corner zone runs from where the drivers come off full throttle to where both are back on it. Linked corners split at the fastest point between them, so each corner keeps its own exit. Flat-out kinks stay part of the straight. Zones tile the lap, so their gaps add up exactly to the lap-time gap.
 4. **Metrics per zone and driver.**

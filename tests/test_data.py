@@ -23,6 +23,22 @@ def test_find_session_with_several_matches(monkeypatch):
         data.find_session(2026, "United States", "Day 1")                     # different places: ask for the city
 
 
+def test_laps_get_their_qualifying_part():
+    # 2026 São Paulo: Q1 started at 18:00, was red-flagged and restarted at 19:26; Q2 at 19:49; Q3 at 20:14.
+    control = pd.DataFrame({
+        "date": ["2026-11-07T17:47:43+00:00", "2026-11-07T18:00:00+00:00", "2026-11-07T19:26:00+00:00",
+                 "2026-11-07T19:49:00+00:00", "2026-11-07T20:14:00+00:00"],
+        "message": ["YELLOW IN TRACK SECTOR 1"] + ["SESSION STARTED"] * 4,
+        "qualifying_phase": [1, 1, 1, 2, 3],
+    })
+    starts = data.part_starts(control, "Qualifying")
+    laps = pd.DataFrame({"date_start": ["2026-11-07T18:01:47+00:00", "2026-11-07T19:30:32+00:00",
+                                        "2026-11-07T19:50:00+00:00", "2026-11-07T20:20:00+00:00"]})
+    assert data.lap_parts(laps, starts) == ["Q1", "Q1", "Q2", "Q3"]  # the 84-minute red flag stays inside Q1
+    assert data.part_starts(control, "Sprint Qualifying").index[0] == "SQ1"
+    assert data.part_starts(control.assign(qualifying_phase=None), "Practice 2").empty  # no parts outside qualifying
+
+
 def test_build_telemetry_distance_starts_at_the_line():
     # A car at a steady 180 km/h (50 m/s): car data every 0.25 s from 0.9 s before the line,
     # position at different moments, moving 500 map units (50 m) per second along x.

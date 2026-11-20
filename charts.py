@@ -152,12 +152,19 @@ def telemetry_figure(result, names, colours, title=""):
         fig.add_trace(go.Scatter(x=x, y=lap["Gear"], name=name, legendgroup=name, showlegend=False,
                                  line=dict(color=colour, width=2, shape="hv"), hovertemplate="gear %{y}"), row=5, col=1)
 
-    # Brake is only on/off, so each driver gets a lane (A on top) with a thick
-    # bar wherever the brake is pressed; overlaid on/off lines would hide each other.
+    # Brake is only on/off (OpenF1 has no pressure channel), so each driver gets a
+    # lane (A on top) with a thick bar wherever the brake is pressed; overlaid on/off
+    # lines would hide each other. The bars have gaps, and hover would borrow the
+    # nearest bar point a few metres away, saying "braking" before a driver brakes.
+    # So the bars don't hover; an invisible line with a value at every metre does.
     for lane, lap, name, colour in ((1, a, names[0], colours[0]), (0, b, names[1], colours[1])):
         fig.add_trace(go.Scatter(x=lap["Distance"], y=np.where(lap["Brake"], lane, np.nan), name=name,
                                  legendgroup=name, showlegend=False, line=dict(color=colour, width=10),
-                                 hovertemplate="braking"), row=4, col=1)
+                                 hoverinfo="skip"), row=4, col=1)
+        fig.add_trace(go.Scatter(x=lap["Distance"], y=np.full(len(lap), lane), name=name, legendgroup=name,
+                                 showlegend=False, line=dict(color=colour, width=0),
+                                 customdata=np.where(lap["Brake"], "on", "off"),
+                                 hovertemplate="brake %{customdata}"), row=4, col=1)
 
     # Gap = B's time minus A's: above zero, B is behind.
     fig.add_trace(go.Scatter(x=a["Distance"], y=delta, name="Gap", showlegend=False,
