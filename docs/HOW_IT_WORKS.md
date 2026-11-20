@@ -26,8 +26,8 @@ Each file only talks to the one before it. `analysis.py` has no downloads and no
 
 - **Why OpenF1, not FastF1's loader:** F1's live-timing archive, which FastF1 reads, now returns *401 Unauthorized* without a paid F1 TV login. OpenF1 serves the same ~4 Hz car data for free, from 2023 onwards. FastF1 is still used for corner positions (from MultiViewer).
 - **Channels:** speed, throttle (0–100 %), brake (**on/off only**), gear, RPM, plus X/Y position. For 2026 cars, **DRS is empty**, because active aero replaced it and isn't in the feed.
-- **Deleted laps:** race control posts text such as `CAR 18 (STR) TIME 1:42.680 DELETED ... LAP 4 16:29:11`. Its "LAP 4" was OpenF1's lap 3, an off-by-one in this session. So the code ignores lap numbers and uses the **incident's clock time** (16:29:11 local → UTC) to find the lap being driven at that moment. It also handles sessions that run past midnight.
-- **Rate limits and caching:** OpenF1's free tier allows 3 requests/s and 30/min. A "429 Too Many Requests" reply is retried after 2, 5, 15, then 40 s. Every request goes through FastF1's disk cache for 10 minutes: short enough that a just-finished session corrects itself, long enough to absorb bursts.
+- **Deleted laps:** race control posts text such as `CAR 18 (STR) TIME 1:42.680 DELETED ... LAP 4 16:29:11`. Its "LAP 4" was OpenF1's lap 3, an off-by-one in this session. So the code ignores lap numbers and uses the **incident's clock time** (16:29:11 local → UTC) to find the lap being driven at that moment. It also handles sessions that run past midnight. A lap given back after review (`CAR 44 (HAM) TIME 1:20.755 WILL BE REINSTATED`) names its lap time instead of a clock time, so it's matched by lap time and counts again.
+- **Rate limits and caching:** OpenF1's free tier allows 3 requests/s and 30/min. A "429 Too Many Requests" reply is retried after 2, 5, 15, then 40 s. Answers are cached on disk for 10 minutes with requests-cache (the library FastF1's own cache is built on): short enough that a just-finished session corrects itself, long enough to absorb bursts. FastF1's request helper isn't used for OpenF1 because it has a hidden cap of 500 downloads per hour, shared by every visitor of the hosted app, and raises an error past it (found in an audit).
 
 ### Building the telemetry table
 - **Padding:** fetch 2 s either side of the lap. Samples never land exactly on the line, so we need one on each side to interpolate between.
@@ -107,7 +107,9 @@ Zones are ranked by time lost (≥ 0.02 s, top 5). For a corner, the loss is spl
 | Brake switches on between samples at 592.5 and 605 m | Braking point lands halfway (598.75 m) |
 | Hand-built lap with linked corners and a kink | Zone boundaries exactly as worked out on paper |
 | Car B brakes 20 m earlier | End-to-end: "B loses at T1 [Braking], brakes earlier", and zone gaps sum to the lap gap |
-| Real race-control messages, and a lap past midnight | Deleted laps found by clock time |
+| Straights that drop, flatten or keep climbing, each after an early lift | The deployment flag, judged on the last flat-out run |
+| Raw OpenF1-style tables for a steady 180 km/h | Distance is 0 m at the line and 400 m after 8 s |
+| Real race-control messages, a lap past midnight, a reinstated lap | Deleted laps found by clock time, reinstated ones by lap time |
 
 ## Honest weaknesses (say these before they're asked)
 

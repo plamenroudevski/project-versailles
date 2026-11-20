@@ -5,10 +5,28 @@ Race control's "LAP n" didn't match OpenF1's lap numbers in 2026 Brazil, so
 data.py matches the incident's local clock time to the lap being driven.
 """
 
+import numpy as np
 import pandas as pd
 import pytest
 
 import data
+
+
+def test_build_telemetry_distance_starts_at_the_line():
+    # A car at a steady 180 km/h (50 m/s): car data every 0.25 s from 0.9 s before the line,
+    # position at different moments, moving 500 map units (50 m) per second along x.
+    start = pd.Timestamp("2026-11-07T19:00:00+00:00")
+    car_s, pos_s = np.arange(-0.9, 10, 0.25), np.arange(-1.0, 10.2, 0.27)
+
+    def stamps(seconds):
+        return [(start + pd.to_timedelta(s, unit="s")).isoformat() for s in seconds]
+
+    car = pd.DataFrame({"date": stamps(car_s), "speed": 180, "throttle": 100, "brake": 0, "n_gear": 8, "drs": None})
+    pos = pd.DataFrame({"date": stamps(pos_s), "x": 500 * pos_s, "y": 0.0})
+    tel = data.build_telemetry(car, pos, start)
+    assert np.interp(0.0, tel["Time"], tel["Distance"]) == pytest.approx(0.0)    # the line is at 0 m
+    assert np.interp(8.0, tel["Time"], tel["Distance"]) == pytest.approx(400.0)  # 8 s at 50 m/s
+    assert tel["X"].to_numpy() == pytest.approx(500 * car_s)                      # position moved onto car-data times
 
 
 def test_notes_file_name():
@@ -44,6 +62,19 @@ def test_deleted_lap_found_by_incident_time():
     sao_paulo = pd.to_timedelta(-3, unit="h")
     assert data.deleted_laps(control, laps, "STR", sao_paulo) == {3}
     assert data.deleted_laps(control, laps, "NOR", sao_paulo) == set()
+
+
+def test_reinstated_lap_counts_again():
+    # Deleted for track limits, then given back after review (real wording from 2025 Barcelona).
+    laps = pd.DataFrame({"lap_number": [7, 8], "date_start": ["2025-06-01T13:20:00+00:00", "2025-06-01T13:21:21+00:00"],
+                         "lap_duration": [80.755, 81.2]})
+    control = pd.DataFrame({
+        "date": ["2025-06-01T13:21:30+00:00", "2025-06-01T13:34:43+00:00"],
+        "message": ["CAR 44 (HAM) TIME 1:20.755 DELETED - TRACK LIMITS AT TURN 10 LAP 7 15:21:10",
+                    "CAR 44 (HAM) TIME 1:20.755 WILL BE REINSTATED"],
+    })
+    assert data.deleted_laps(control.iloc[:1], laps, "HAM", pd.to_timedelta(2, unit="h")) == {7}  # before review
+    assert data.deleted_laps(control, laps, "HAM", pd.to_timedelta(2, unit="h")) == set()          # after review
 
 
 def test_deleted_lap_just_before_local_midnight():

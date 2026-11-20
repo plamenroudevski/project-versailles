@@ -13,10 +13,13 @@ Sources:
   (F1's own live-timing archive, which FastF1 normally reads, now requires a
   paid F1 TV login, which is why telemetry comes from OpenF1.)
 
-Caching: every web request goes through FastF1's disk cache, a small database
-in FastF1's cache folder. The same OpenF1 request within CACHE_EXPIRY_S (10
-minutes) is answered from disk: instant, and doesn't use up OpenF1's rate
-limit. The app adds Streamlit's in-memory cache on top of this.
+Caching: OpenF1 answers are kept on disk (a small database in the temp folder)
+by requests-cache, the library FastF1's own cache is built on. The same request
+within CACHE_EXPIRY_S (10 minutes) is answered from disk: instant, and doesn't
+use up OpenF1's rate limit. The app adds Streamlit's in-memory cache on top.
+FastF1's request helper isn't used for OpenF1 because it also enforces a hidden
+cap of 500 downloads per hour, shared by every visitor of the app, and raises
+an error past it. Corner positions still come through FastF1 and its cache.
 
 Your notes: plain Markdown files in notes/, one per session and driver pair,
 so you can write them in Obsidian and commit them with the code. No database.
@@ -30,9 +33,9 @@ import time
 import unicodedata
 from pathlib import Path
 
-import fastf1
 import numpy as np
 import pandas as pd
+import requests_cache
 from fastf1.mvapi import get_circuit_info
 
 API = "https://api.openf1.org/v1"
@@ -48,6 +51,9 @@ RETRY_WAITS_S = (2, 5, 15, 40)
 # bursts (listing 20 drivers reads the same laps answer 20 times).
 CACHE_EXPIRY_S = 600
 
+# One shared download session, caching to openf1.sqlite in the system's temp folder.
+HTTP = requests_cache.CachedSession("openf1", use_temp=True, expire_after=CACHE_EXPIRY_S)
+
 # Seconds of telemetry fetched either side of a lap. Samples arrive every
 # ~0.25 s and never land exactly on the start/finish line, so the padding
 # gives us samples on both sides of the line to interpolate between.
@@ -59,6 +65,11 @@ LAP_PADDING_S = 2.0
 # This pattern pulls out the driver code and the final hh:mm:ss, which is the
 # local clock time of the incident.
 DELETED_LAP = re.compile(r"\((?P<driver>[A-Z]{3})\).*\bDELETED\b.*\b(?P<clock>\d{2}:\d{2}:\d{2})\b")
+
+# A deleted lap can be given back after a review. That message names the lap
+# time instead of a clock time, for example (2025 Barcelona):
+#   "CAR 44 (HAM) TIME 1:20.755 WILL BE REINSTATED"
+REINSTATED_LAP = re.compile(r"\((?P<driver>[A-Z]{3})\) TIME (?P<minutes>\d+):(?P<seconds>\d{2}\.\d{3})\b.*\bREINSTATED\b")
 
 
 def openf1(endpoint, **params):
@@ -75,8 +86,7 @@ def openf1(endpoint, **params):
     """
     # One try per wait in RETRY_WAITS_S, plus a last try (None: don't wait again, give up).
     for wait_s in (*RETRY_WAITS_S, None):
-        response = fastf1.Cache.requests_get(f"{API}/{endpoint}", params=params, timeout=60,
-                                             expire_after=CACHE_EXPIRY_S)
+        response = HTTP.get(f"{API}/{endpoint}", params=params, timeout=60)
         if response.status_code != 429 or wait_s is None:
             break
         time.sleep(wait_s)
@@ -101,6 +111,9 @@ def find_session(year, place, session_name):
     matches = sessions[names.str.contains(place, case=False, regex=False)]
     if matches.empty:
         raise LookupError(f"No {year} {session_name} at '{place}'. Try one of: {', '.join(sessions['location'])}.")
+    if len(matches) > 1:  # e.g. "United States" in 2026: Miami, Austin and Las Vegas
+        raise LookupError(f"'{place}' matches several {year} events ({', '.join(matches['location'])}). "
+                          f"Use the city instead.")
     return matches.iloc[0]
 
 
@@ -173,7 +186,8 @@ def deleted_laps(control, laps, acronym, gmt_offset):
 
     Race control's own "LAP n" doesn't always match OpenF1's lap numbers (in
     2026 Brazil qualifying it was one higher), so we use the incident's clock
-    time instead and find the lap being driven at that moment.
+    time instead and find the lap being driven at that moment. Laps race
+    control later reinstates are matched by their lap time and count again.
 
     control:    race-control messages (columns `date` in UTC and `message`)
     laps:       the driver's timed laps (`lap_number`, `date_start`, `lap_duration`)
@@ -195,6 +209,13 @@ def deleted_laps(control, laps, acronym, gmt_offset):
             incident_local -= pd.to_timedelta(1, unit="D")
         incident = incident_local - gmt_offset
         deleted.update(laps.loc[(starts <= incident) & (incident < ends), "lap_number"])
+
+    # shortcut: a reinstatement always wins, even if the lap were deleted again
+    # afterwards (not seen in 2025-2026 data); compare publish times if that ever happens.
+    back = control["message"].str.extract(REINSTATED_LAP)
+    for minutes, seconds in back.loc[back["driver"] == acronym, ["minutes", "seconds"]].itertuples(index=False):
+        lap_time = int(minutes) * 60 + float(seconds)
+        deleted -= set(laps.loc[(laps["lap_duration"] - lap_time).abs() < 0.0005, "lap_number"])
     return deleted
 
 
@@ -229,16 +250,7 @@ def fastest_lap(laps):
 
 
 def get_lap_telemetry(session_key, driver_number, lap):
-    """Return one lap of telemetry as a table, one row per car-data sample (~4 Hz).
-
-    Columns:
-      Time      seconds since the car crossed the start line (padding samples
-                are slightly negative, or later than the lap time)
-      Distance  metres from the start line, from integrating speed over time
-      Speed (km/h), Throttle (%), Brake (True/False), Gear, RPM
-      X, Y      position on track (OpenF1/MultiViewer grid, units of 0.1 m)
-      DRS       raw DRS value (empty for 2026 cars, which use active aero)
-    """
+    """Download one lap of telemetry, plus LAP_PADDING_S either side, as a tidy table (see build_telemetry)."""
     start = pd.Timestamp(lap["date_start"])
     pad = pd.to_timedelta(LAP_PADDING_S, unit="s")
     end = start + pd.to_timedelta(float(lap["lap_duration"]), unit="s")
@@ -247,7 +259,21 @@ def get_lap_telemetry(session_key, driver_number, lap):
     pos = openf1("location", session_key=session_key, driver_number=driver_number, **window)
     if car.empty or pos.empty:
         raise LookupError(f"No telemetry for lap {lap['lap_number']} yet. OpenF1 may still be processing it.")
+    return build_telemetry(car, pos, start)
 
+
+def build_telemetry(car, pos, start):
+    """Turn OpenF1's raw car-data and position tables into one telemetry table.
+
+    Kept apart from the download so it can be tested without internet.
+    `start` is the moment the lap began. One row per car-data sample (~4 Hz):
+      Time      seconds since the car crossed the start line (padding samples
+                are slightly negative, or later than the lap time)
+      Distance  metres from the start line, from integrating speed over time
+      Speed (km/h), Throttle (%), Brake (True/False), Gear
+      X, Y      position on track (OpenF1/MultiViewer grid, units of 0.1 m)
+      DRS       raw DRS value (empty for 2026 cars, which use active aero)
+    """
     def seconds_since_start(frame):
         return (pd.to_datetime(frame["date"], format="ISO8601") - start).dt.total_seconds().to_numpy()
 
@@ -260,7 +286,6 @@ def get_lap_telemetry(session_key, driver_number, lap):
         "Throttle": car["throttle"].to_numpy(dtype=float),
         "Brake": car["brake"].to_numpy() > 0,
         "Gear": car["n_gear"].to_numpy(),
-        "RPM": car["rpm"].to_numpy(dtype=float),
         "DRS": car["drs"].to_numpy(),
         # Position is sampled at different instants from car data, so interpolate it onto the car-data times.
         "X": np.interp(car_t, pos_t, pos["x"].to_numpy(dtype=float)),

@@ -211,7 +211,7 @@ def track_map_figure(result, corners, names, colours, title=""):
     # Labels get a see-through dark box: where a corner sits right next to
     # other track (T15 on Interlagos's main straight), the label stays readable.
     angle = np.radians(corners["Angle"].to_numpy(dtype=float))
-    labels = "T" + corners["Number"].astype(str) + corners["Letter"].fillna("").astype(str)
+    labels = analysis.corner_labels(corners)
     for label, x, y in zip(labels, corners["X"] + LABEL_OFFSET * np.cos(angle),
                            corners["Y"] + LABEL_OFFSET * np.sin(angle)):
         fig.add_annotation(x=x, y=y, text=label, showarrow=False, bgcolor="rgba(14, 17, 23, 0.75)",

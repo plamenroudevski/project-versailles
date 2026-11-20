@@ -114,6 +114,25 @@ def test_zone_split_by_hand():
     ]
 
 
+def straight(speed_at, lift):
+    """A 1000 m straight on a 1 m grid: flat out and off the brake, except a lift between lift[0] and lift[1] m."""
+    d = np.arange(0.0, 1001.0)
+    throttle = np.where((d >= lift[0]) & (d < lift[1]), 0.0, 100.0)
+    return pd.DataFrame({"Distance": d, "Speed": [speed_at(x) for x in d], "Throttle": throttle,
+                         "Brake": np.zeros(d.size, bool)})
+
+
+@pytest.mark.parametrize("speed_at, expected", [
+    (lambda d: min(200 + 0.2 * d, 300) - max(0, d - 600) * 0.0125, "drops"),  # peaks at 300, ends 5 km/h lower
+    (lambda d: min(200 + 0.2 * d, 300), "flattens"),                          # stuck at 300 km/h from 500 m
+    (lambda d: 200 + 0.1 * d, None),                                         # still accelerating at the end
+])
+def test_deployment_flag(speed_at, expected):
+    # The lift at 100-150 m means the run to judge is the last one (150 m onwards), which is
+    # long enough; judging the first run (0-100 m, too short) would wrongly give no flag.
+    assert analysis.straight_metrics(straight(speed_at, lift=(100, 150)), 0, 1000)["deployment"] == expected
+
+
 def test_mini_sectors_go_to_the_faster_car():
     # A is faster everywhere, so A (0) wins every mini-sector; swap the laps and B (1) does.
     tel_fast, time_fast = simulate_lap(lambda d: 180.0)

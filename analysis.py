@@ -171,6 +171,11 @@ def align_laps(tel_a, lap_time_a, tel_b, lap_time_b):
     return a, b, (b["Time"] - a["Time"]).to_numpy()
 
 
+def corner_labels(corners):
+    """Corner names from the markers: "T" + number + letter, e.g. T2A. Shared by the zone table and the map."""
+    return "T" + corners["Number"].astype(str) + corners["Letter"].fillna("").astype(str)
+
+
 def locate_corners(corners, lap):
     """Turn corner markers (map X, Y) into distances along the lap.
 
@@ -184,7 +189,7 @@ def locate_corners(corners, lap):
         return lap["Distance"].iloc[int(np.argmin((lap["X"] - x) ** 2 + (lap["Y"] - y) ** 2))]
 
     table = pd.DataFrame({
-        "Label": "T" + corners["Number"].astype(str) + corners["Letter"].fillna("").astype(str),
+        "Label": corner_labels(corners),
         "Distance": [nearest(x, y) for x, y in zip(corners["X"], corners["Y"])],
     })
     return table.sort_values("Distance").reset_index(drop=True)
@@ -294,8 +299,8 @@ def corner_metrics(lap, start, end):
                    when the zone starts.
     min_speed      slowest point of the corner (km/h); apex = where it is (m)
     gear_at_min    gear at the slowest point
-    full_throttle  where throttle is back to full after the apex (m); NaN if
-                   not within the zone
+    full_throttle  where the driver is back to full throttle, off the brake,
+                   after the apex (m); NaN if not within the zone
     exit_speed     speed at the end of the zone (km/h)
     """
     z = lap[(lap["Distance"] >= start) & (lap["Distance"] <= end)]
@@ -307,7 +312,7 @@ def corner_metrics(lap, start, end):
         brake_point = entry.loc[entry["Brake"], "Distance"].iloc[0]
 
     exit_part = z.loc[i_min:]
-    on_full = exit_part.loc[exit_part["Throttle"] >= FULL_THROTTLE_PCT, "Distance"]
+    on_full = exit_part.loc[flat_out(exit_part), "Distance"]
     return {
         "brake_point": brake_point,
         "min_speed": z.at[i_min, "Speed"],

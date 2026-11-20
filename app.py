@@ -17,7 +17,7 @@ re-download everything each time. So the functions that fetch or compute are
 wrapped in `@st.cache_data`. That line is a decorator: it wraps the function
 below it with extra behaviour, here "remember the answer for each set of
 inputs". A re-run with the same inputs gets the remembered answer instantly.
-Under that, data.py's FastF1 disk cache keeps raw downloads for 10 minutes.
+Under that, data.py's disk cache keeps raw downloads for 10 minutes.
 """
 
 import re
@@ -110,7 +110,9 @@ def lap_picker(session_key, acronym):
 
 st.sidebar.header("Compare two laps")
 try:
-    year = st.sidebar.selectbox("Year", range(datetime.now(timezone.utc).year, FIRST_YEAR - 1, -1))
+    years = list(range(datetime.now(timezone.utc).year, FIRST_YEAR - 1, -1))
+    # Until the new season's first event, open on last season instead of an empty page.
+    year = st.sidebar.selectbox("Year", years, index=1 if events(years[0]).empty and len(years) > 1 else 0)
     season = events(year)
     if season.empty:
         stop(f"No {year} events have started yet.")

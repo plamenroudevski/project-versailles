@@ -29,7 +29,7 @@ A track map colours 25 mini-sectors by the faster driver. Each finding is reprod
 
 ## Method
 
-1. **Data.** Lap times, car telemetry (speed, throttle, brake, gear, RPM at ~4 Hz) and car position come from [OpenF1](https://openf1.org). Corner positions come from MultiViewer via [FastF1](https://github.com/theOehrly/Fast-F1). Laps deleted by race control are excluded from "fastest lap", matched by the incident's clock time, because race control's lap numbers can disagree with the timing data.
+1. **Data.** Lap times, car telemetry (speed, throttle, brake, gear, RPM at ~4 Hz) and car position come from [OpenF1](https://openf1.org). Corner positions come from MultiViewer via [FastF1](https://github.com/theOehrly/Fast-F1). Laps deleted by race control are excluded from "fastest lap" (matched by the incident's clock time, because race control's lap numbers can disagree with the timing data), and count again if reinstated.
 2. **Alignment.** Distance is speed integrated over time, which drifts a few metres per lap (4250 m vs 4241 m here). Both laps are stretched to a common length so each corner sits at the same metre for both drivers. Then each driver's elapsed time is interpolated onto a 1 m grid and subtracted. The gap is computed here, not with `fastf1.utils.delta_time`, and ends at exactly the lap-time difference.
 3. **Zones.** A corner zone runs from where the drivers come off full throttle to where both are back on it. Linked corners split at the fastest point between them, so each corner keeps its own exit. Flat-out kinks stay part of the straight. Zones tile the lap, so their gaps add up exactly to the lap-time gap.
 4. **Metrics per zone and driver.**
