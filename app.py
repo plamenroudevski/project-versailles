@@ -206,6 +206,16 @@ with right:
     st.caption("Heuristic: one lap's telemetry can suggest a cause but can't prove it.")
     st.markdown("\n".join(f"- {plain(line)}" for line in result["read"]))
 
+# Time gained and lost by type of zone, like AWS F1 Insights' car performance breakdown.
+st.markdown("#### By zone type")
+rows = [f"| {row['Type']} | "
+        + (f"{row['Faster']} by {abs(row['Gap s']):.2f} s" if row["Faster"] != "-" else "level")
+        + f" | {row['Zones'] or '-'} |" for _, row in result["breakdown"].iterrows()]
+st.markdown("| Zone type | Faster | Zones |\n|---|---|---|\n" + "\n".join(rows))
+st.caption(f"Corners are grouped by minimum speed: low-speed under {analysis.LOW_SPEED_MAX_KMH} km/h, "
+           f"high-speed from {analysis.HIGH_SPEED_MIN_KMH} km/h, medium in between. "
+           "The four rows add up to the lap-time gap.")
+
 # Your own notes: a plain Markdown file per session and driver pair (see data.notes_path).
 # Read fresh on every run, so after saving a note in Obsidian, refresh the page.
 notes_file = data.notes_path(run["session"], pair)
@@ -234,6 +244,7 @@ plotly_config = {"displaylogo": False}
 st.plotly_chart(charts.telemetry_figure(result, pair, colours), theme=None, config=plotly_config)
 st.caption("Drag across any chart to zoom: they all follow. Double-click to zoom back out.")
 st.plotly_chart(charts.track_map_figure(result, run["corners"], pair, colours), theme=None, config=plotly_config)
+st.caption("Map labels: who gained in each corner section and straight, and by how much (seconds).")
 
 with st.expander("Zone-by-zone numbers"):
     st.caption(f"Gap s: change in the gap across the zone; + means {name_b} lost time. "

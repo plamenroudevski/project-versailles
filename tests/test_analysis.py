@@ -166,6 +166,26 @@ def test_driver_vs_car_mixed_versus_one_sided():
     assert analysis.driver_vs_car(one_sided, ("A", "B"))[0].startswith("A is slower in 11 of the 12 corners")
 
 
+def test_breakdown_by_zone_type():
+    def corner(name, min_speed, time):
+        return {"kind": "corner", "name": name, "time": time, "a": {"min_speed": min_speed}, "b": {"min_speed": min_speed}}
+
+    # Band edges: exactly 120 km/h is medium, exactly 200 km/h is high.
+    assert analysis.zone_type(corner("X", 120, 0)) == "Medium-speed corners"
+    assert analysis.zone_type(corner("X", 200, 0)) == "High-speed corners"
+
+    results = [corner("T1", 80, 0.10), corner("T2", 150, -0.05), corner("T3", 250, 0.02), corner("T4", 90, 0.03),
+               {"kind": "straight", "name": "T4-Line", "time": -0.20, "a": {}, "b": {}}]
+    table = analysis.type_breakdown(results, ("A", "B")).set_index("Type")
+    assert table.loc["Low-speed corners", "Zones"] == "T1, T4"
+    assert table.loc["Low-speed corners", "Gap s"] == pytest.approx(0.13)
+    assert table.loc["Low-speed corners", "Faster"] == "A"  # gap is B minus A, so positive: B lost time
+    assert table.loc["Medium-speed corners", "Faster"] == "B"
+    assert table.loc["High-speed corners", "Zones"] == "T3"
+    assert table.loc["Straights", "Faster"] == "B"
+    assert table["Gap s"].sum() == pytest.approx(sum(z["time"] for z in results))  # rows add up to the lap gap
+
+
 def test_earlier_braking_is_found_end_to_end():
     # B brakes 20 m earlier into the only corner and is otherwise identical.
     tel_a, time_a = corner_lap(brake_from=600)

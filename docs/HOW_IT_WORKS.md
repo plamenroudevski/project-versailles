@@ -84,15 +84,20 @@ Zones are ranked by time lost (≥ 0.02 s, top 5). For a corner, the loss is spl
 
 ## 6. Driver vs car (`driver_vs_car`), a heuristic
 
-- **Repeats everywhere → car.** A lower top speed on *every* straight, or losing in *every* slow corner (< 150 km/h): a driver's mistakes rarely repeat that neatly.
+- **Repeats everywhere → car.** A lower top speed on *every* straight, or losing in *every* low-speed corner (minimum speed < 120 km/h): a driver's mistakes rarely repeat that neatly.
   - Straights are judged on **top speed, not time**. Norris "lost time on all straights" here but had the *higher* top speed on two of them; the time came from weaker corner exits.
 - **Swings corner to corner → driver.** The car is the same car in every corner. Brazil: NOR quicker in 5 corners, RUS in 9.
 - **One-sided (e.g. 11 to 1) → can't tell:** either overall grip or a consistent driving difference. A "swing" needs the less successful driver to win at least 25 % of the corners.
+
+### By zone type (`type_breakdown`)
+
+Like AWS F1 Insights' car performance scores: every zone is a low-speed corner (minimum speed under 120 km/h, averaged over both drivers), a medium-speed corner, a high-speed corner (from 200 km/h) or a straight. Each group's zone times are summed. The bands are rough conventions (AWS doesn't publish its cut-offs) and live in CONFIG. The four sums add up to the lap gap, because the zones cover the lap exactly once. Brazil, whole-session laps: Russell gained 0.415 s in low-speed corners and 0.220 s on straights, and the medium-speed corners were level. The same bands define "low-speed corners" in the car/driver read, so the two can't disagree.
 
 ## 7. Charts and app
 
 - **One Plotly figure with five rows sharing an x-axis.** That's the only way zoom stays in sync, because separate Streamlit charts can't talk to each other.
 - **Brake lanes:** on/off signals for two drivers would hide each other as lines, so each driver gets a lane with bars. OpenF1's brake channel is only 0 or 100 (no pressure), so there's no brake % to show. The bars have gaps, and Plotly's hover borrowed the nearest bar point a few metres away, reporting "braking" for a driver who hadn't braked yet. So an invisible line with a value at every metre carries the hover ("brake on/off") instead.
+- **Track map labels:** each corner label adds who gained in that corner section and by how much (its zone time), in that driver's colour, and each straight gets the same note halfway along. Flat-out kinks have no zone, so their labels stay plain.
 - **Colours:** team colours unless they look too alike or too dark. "Alike" is measured as a perceptual colour difference (CIE Lab ΔE ≥ 30) for normal vision *and* simulated deuteranopia. "Too dark" means WCAG contrast below 3:1 against the background. Otherwise a colour-blind-safe orange/blue pair is used.
 - **Streamlit re-runs the whole script** on every click. `@st.cache_data` remembers results per input for 10 minutes, so re-runs are instant.
 - **Notes:** plain Markdown in `notes/`, named by session and sorted driver pair. The create button only appears on localhost, because the hosted app's disk is wiped on restart.

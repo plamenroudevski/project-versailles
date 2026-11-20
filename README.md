@@ -17,6 +17,9 @@ Russell 1:26.745 (lap 18, in Q2), Norris 1:27.470 (lap 23, in Q3). Rain fell dur
 4. [Mid-corner]    RUS loses ~0.16 s at T11: min speed 10 km/h lower.
 5. [Traction/exit] NOR loses ~0.16 s at T10: up to 8 km/h slower after the apex.
 
+By zone type: low-speed corners RUS by 0.415 s, medium-speed NOR by 0.009 s,
+high-speed RUS by 0.100 s, straights RUS by 0.220 s (together: the 0.725 s lap gap).
+
 Driver vs car (heuristic): the gap swings both ways corner by corner (NOR quicker in 5,
 RUS in 9 of 14), which suggests driving differences rather than the car.
 ```
@@ -25,7 +28,7 @@ Speed (with corner numbers), time gap, throttle, brake and gear share one lap-di
 
 ![Telemetry comparison: speed, gap, throttle, brake and gear](docs/telemetry.png)
 
-A track map colours 25 mini-sectors by the faster driver. Each finding is reproducible from the terminal: `python analysis.py 2026 Brazil Qualifying NOR RUS`.
+A track map colours 25 mini-sectors by the faster driver and labels every corner section and straight with who gained there and by how much. Each finding is reproducible from the terminal: `python analysis.py 2026 Brazil Qualifying NOR RUS`.
 
 ## Method
 
@@ -40,7 +43,8 @@ A track map colours 25 mini-sectors by the faster driver. Each finding is reprod
    - After the apex, with a lower minimum speed and an exit-speed gap that didn't grow: *Mid-corner* (lost in the middle, carried out).
    - After the apex, with a growing gap: *Traction/exit*.
    - On straights: if the loser started the straight slower but wasn't slower at the top, the time is credited to the previous corner's exit (*Traction/exit*). Otherwise it's *Straight-line/deployment*.
-6. **Driver vs car (heuristic).** A deficit that repeats on every straight (judged on top speed) or in every slow corner points to the car. A deficit that swings from corner to corner points to the driver. All wording is hedged.
+6. **By zone type.** Like AWS F1 Insights' car performance breakdown: corners are grouped by minimum speed into low-speed (under 120 km/h), medium and high-speed (from 200 km/h), plus straights, with the time each driver gained in each group. The four add up to the lap gap.
+7. **Driver vs car (heuristic).** A deficit that repeats on every straight (judged on top speed) or in every low-speed corner points to the car. A deficit that swings from corner to corner points to the driver. All wording is hedged.
 
 Every threshold lives in one commented `CONFIG` block at the top of [`analysis.py`](analysis.py). The full walk-through is in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 

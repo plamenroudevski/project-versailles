@@ -93,11 +93,16 @@ DEPLOY_FLAT_GAIN_KMH = 1
 # DEPLOY_FLAT_WINDOW_M of the flat-out run, it "flattens". A car at its
 # drag-limited top speed also flattens, which is why this is only "possible".
 
-SLOW_CORNER_KMH = 150
-# Corners with a minimum speed below this count as slow for the car/driver read.
+LOW_SPEED_MAX_KMH = 120
+HIGH_SPEED_MIN_KMH = 200
+# Corner speed bands, by the corner's minimum speed (average of both drivers):
+# low-speed below 120 km/h, high-speed from 200 km/h, medium in between. The
+# usual rough bands for a breakdown like AWS F1 Insights' car performance
+# scores, which don't publish exact cut-offs. Also the "low-speed corners" of
+# the car/driver read.
 
 PATTERN_MIN_ZONES = 2
-# At least this many straights (or slow corners) are needed to call a pattern.
+# At least this many straights (or low-speed corners) are needed to call a pattern.
 
 PATTERN_MIN_TIME_S = 0.01
 # Zone gaps smaller than this count as "level" in the car/driver read.
@@ -530,6 +535,35 @@ def rank_findings(results, names):
     return findings[:TOP_FINDINGS]
 
 
+ZONE_TYPES = ("Low-speed corners", "Medium-speed corners", "High-speed corners", "Straights")
+
+
+def zone_type(zone):
+    """Which of ZONE_TYPES a measured zone is. Corners go by minimum speed, averaged over both drivers."""
+    if zone["kind"] == "straight":
+        return "Straights"
+    speed = (zone["a"]["min_speed"] + zone["b"]["min_speed"]) / 2
+    if speed < LOW_SPEED_MAX_KMH:
+        return "Low-speed corners"
+    return "High-speed corners" if speed >= HIGH_SPEED_MIN_KMH else "Medium-speed corners"
+
+
+def type_breakdown(results, names):
+    """Time gained and lost by zone type, like a broadcast "car performance" breakdown.
+
+    One row per ZONE_TYPES entry: Type, Zones (their names), Gap s (B minus A,
+    positive = B slower) and Faster (who gained there overall). Because the
+    zones cover the lap exactly once, the four gaps add up to the lap-time gap.
+    """
+    rows = []
+    for kind in ZONE_TYPES:
+        zones = [z for z in results if zone_type(z) == kind]
+        gap = sum(z["time"] for z in zones)
+        faster = names[0] if gap > 0 else names[1] if gap < 0 else "-"
+        rows.append({"Type": kind, "Zones": ", ".join(z["name"] for z in zones), "Gap s": gap, "Faster": faster})
+    return pd.DataFrame(rows)
+
+
 def consistent_loser(deficits, names, threshold):
     """The driver who is worse in every one of these zones, or None if it's mixed.
 
@@ -548,7 +582,7 @@ def consistent_loser(deficits, names, threshold):
 def driver_vs_car(results, names):
     """Heuristic read of whether the deficits look like the car or the driver.
 
-    - A deficit that repeats on every straight, or in every slow corner,
+    - A deficit that repeats on every straight, or in every low-speed corner,
       points to the car: a driver's mistakes rarely repeat that neatly.
       Straights are judged on top speed, not time: time on a straight is
       mostly decided by the exit of the corner before it, which is driving.
@@ -560,7 +594,7 @@ def driver_vs_car(results, names):
     straights = [z for z in results if z["kind"] == "straight"]
     corners = [z for z in results if z["kind"] == "corner"]
     top_speed_deficits = [z["a"]["top_speed"] - z["b"]["top_speed"] for z in straights]
-    slow_corner_times = [z["time"] for z in corners if min(z["a"]["min_speed"], z["b"]["min_speed"]) < SLOW_CORNER_KMH]
+    slow_corner_times = [z["time"] for z in corners if zone_type(z) == "Low-speed corners"]
 
     lines = []
     who = consistent_loser(top_speed_deficits, names, MIN_SPEED_DIFF_KMH)
@@ -569,7 +603,7 @@ def driver_vs_car(results, names):
                      f"car-side straight-line limit (power unit, deployment or drag) rather than driving.")
     who = consistent_loser(slow_corner_times, names, PATTERN_MIN_TIME_S)
     if who:
-        lines.append(f"{who} loses time in all {len(slow_corner_times)} slow corners: telemetry suggests a "
+        lines.append(f"{who} loses time in all {len(slow_corner_times)} low-speed corners: telemetry suggests a "
                      f"car-side limit in low-speed grip or traction rather than driving.")
 
     a_quicker = sum(z["time"] > PATTERN_MIN_TIME_S for z in corners)
@@ -609,6 +643,7 @@ def compare(tel_a, lap_time_a, tel_b, lap_time_b, corners, names):
       table     zone table (see zone_table)
       findings  ranked findings (see rank_findings)
       read      driver-vs-car sentences (see driver_vs_car)
+      breakdown time gained by zone type: low/medium/high-speed corners, straights (see type_breakdown)
       mini_sectors  faster driver per mini-sector (see mini_sector_winners)
     """
     a, b, delta = align_laps(tel_a, lap_time_a, tel_b, lap_time_b)
@@ -619,6 +654,7 @@ def compare(tel_a, lap_time_a, tel_b, lap_time_b, corners, names):
         "table": zone_table(zones, names),
         "findings": rank_findings(zones, names),
         "read": driver_vs_car(zones, names),
+        "breakdown": type_breakdown(zones, names),
         "mini_sectors": mini_sector_winners(a, delta),
     }
 
@@ -704,6 +740,11 @@ def main(year, place, session_name, name_a, name_b):
     print("\nRANKED FINDINGS (biggest first)")
     for i, finding in enumerate(result["findings"], 1):
         print(f"  {i}. [{finding['cause']}] {finding['text']}")
+
+    print(f"\nBY ZONE TYPE (corners by minimum speed: low < {LOW_SPEED_MAX_KMH}, high >= {HIGH_SPEED_MIN_KMH} km/h)")
+    for _, row in result["breakdown"].iterrows():
+        gain = f"{row['Faster']} faster by {abs(row['Gap s']):.3f} s" if row["Faster"] != "-" else "level"
+        print(f"  {row['Type']:<21} {gain:<26} {row['Zones'] or 'none'}")
 
     print("\nDRIVER VS CAR (heuristic: one lap can't prove cause)")
     for line in result["read"]:

@@ -199,6 +199,8 @@ def telemetry_figure(result, names, colours, title=""):
 def track_map_figure(result, corners, names, colours, title=""):
     """The circuit, each mini-sector coloured by the driver who was faster through it.
 
+    Each corner section and straight is also labelled with who gained there and
+    by how much (its zone time from the analysis), in that driver's colour.
     The track line is driver A's position data. `corners` are the raw markers
     from data.get_corners(); their labels are pushed LABEL_OFFSET off the
     track in the direction MultiViewer gives, so they don't sit on the line.
@@ -217,12 +219,32 @@ def track_map_figure(result, corners, names, colours, title=""):
 
     # Labels get a see-through dark box: where a corner sits right next to
     # other track (T15 on Interlagos's main straight), the label stays readable.
+    def label_at(x, y, text, colour):
+        fig.add_annotation(x=x, y=y, text=text, showarrow=False, bgcolor="rgba(14, 17, 23, 0.75)",
+                           font=dict(color=colour, size=FONT_SIZE - 2))
+
+    def gain(time):
+        """'NOR 0.21' and NOR's colour, for whoever gained `time` (B minus A: positive = B lost, A gained)."""
+        winner = 0 if time > 0 else 1
+        return f"{names[winner]} {abs(time):.2f}", colours[winner]
+
+    # Corners: "T4 RUS 0.21". Flat-out kinks have no zone of their own, so they stay plain.
+    corner_times = {z["name"]: z["time"] for z in result["zones"] if z["kind"] == "corner"}
     angle = np.radians(corners["Angle"].to_numpy(dtype=float))
     labels = analysis.corner_labels(corners)
     for label, x, y in zip(labels, corners["X"] + LABEL_OFFSET * np.cos(angle),
                            corners["Y"] + LABEL_OFFSET * np.sin(angle)):
-        fig.add_annotation(x=x, y=y, text=label, showarrow=False, bgcolor="rgba(14, 17, 23, 0.75)",
-                           font=dict(color=MUTED, size=FONT_SIZE - 2))
+        if label in corner_times:
+            note, colour = gain(corner_times[label])
+            label_at(x, y, f"{label} {note}", colour)
+        else:
+            label_at(x, y, label, MUTED)
+
+    # Straights: the same note, halfway along.
+    for zone in result["zones"]:
+        if zone["kind"] == "straight":
+            middle = int(np.argmin(np.abs(a["Distance"] - (zone["start"] + zone["end"]) / 2)))
+            label_at(a["X"].iloc[middle], a["Y"].iloc[middle], *gain(zone["time"]))
     fig.add_trace(go.Scatter(x=[a["X"].iloc[0]], y=[a["Y"].iloc[0]], mode="markers", name="Start/finish",
                              marker=dict(color=TEXT, size=11, symbol="square"), hoverinfo="skip"))
 
