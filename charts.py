@@ -1,9 +1,11 @@
 """
-charts.py: Plotly figures for a two-driver comparison.
+charts.py: Plotly figures for a two-driver comparison, and the race-pace
+classification and lap-time distribution.
 
-Pipeline position:  data.py -> analysis.py -> charts.py -> app.py
-Draws analysis.compare()'s result and calculates nothing new. It has no
-Streamlit code, so the same figures work in the app and as standalone HTML:
+Pipeline position:  data.py -> analysis.py / pace.py -> charts.py -> app.py
+Draws analysis.compare()'s and pace.analyse()'s results and calculates
+nothing new. It has no Streamlit code, so the same figures work in the app
+and as standalone HTML:
 
     python charts.py                                    # 2026 Brazil Qualifying, NOR vs RUS
     python charts.py 2025 Monza Qualifying LEC HAM
@@ -15,19 +17,28 @@ writes two files into output/:
     ..._track_map.html  the circuit, coloured by the faster driver in each
                         mini-sector
 
+    python charts.py 2026 Brazil                        # race pace (year and place only)
+
+writes two more:
+    ..._Race_pace_classification.html  a TV-style timing tower ranked by median pace
+    ..._Race_pace_distribution.html    every driver's clean laps as a box plot
+
 The look is a pit-wall screen, not a busy dashboard: dark, two high-contrast
 driver colours, large labels, almost no gridlines.
 """
 
+import html
 import os
 import re
 import sys
 
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 import analysis
+import pace
 
 # ---- Look and feel ----------------------------------------------------------
 BACKGROUND = "#0E1117"  # Streamlit's dark-theme background, so charts blend into the app
@@ -255,6 +266,196 @@ def track_map_figure(result, corners, names, colours, title=""):
     return fig
 
 
+# ---- Race pace -----------------------------------------------------------------
+
+COMPOUNDS = {
+    "SOFT": ("Soft", "#E8002D", "circle"),
+    "MEDIUM": ("Medium", "#FFD12E", "square"),
+    "HARD": ("Hard", "#F0F0F0", "diamond"),
+    "INTERMEDIATE": ("Intermediate", "#43B02A", "triangle-up"),
+    "WET": ("Wet", "#1E8FFF", "triangle-down"),
+    "UNKNOWN": ("Unknown", MUTED, "x"),
+}
+# Pirelli's tyre colours (soft red, medium yellow, hard white, intermediate
+# green, wet blue), plus grey for laps OpenF1 has no tyre data for. Each also
+# gets its own marker shape: soft red and intermediate green look alike to
+# deuteranopes (see DEUTERANOPIA), and a wet race can have both.
+
+JITTER = 0.2
+# Dots are spread up to this far either side of their box's centre (boxes are
+# 1 apart), so laps with similar times don't hide each other.
+
+
+def team_colour(value):
+    """OpenF1's 'F47600' -> '#F47600'. Anything else (missing, malformed) -> MUTED.
+
+    Checked strictly because the colour is written into HTML and CSS.
+    """
+    if isinstance(value, str) and re.fullmatch(r"#?[0-9A-Fa-f]{6}", value):
+        return "#" + value.lstrip("#")
+    return MUTED
+
+
+def see_through(colour, alpha):
+    """'#F47600', 0.25 -> 'rgba(244, 118, 0, 0.25)': the same colour, partly transparent."""
+    return f"rgba({int(colour[1:3], 16)}, {int(colour[3:5], 16)}, {int(colour[5:7], 16)}, {alpha})"
+
+
+TOWER_CSS = """
+.pace-tower { font-family: "Source Sans Pro", system-ui, sans-serif; color: #FAFAFA; max-width: 780px;
+  font-variant-numeric: tabular-nums; overflow-x: auto; padding-top: 4px; }
+.pace-title { font-size: 19px; font-weight: 600; margin: 0 0 12px; }
+.pace-head, .pace-row { display: grid; align-items: center; column-gap: 12px; padding: 0 14px;
+  grid-template-columns: 2em 6px 3.4em minmax(7em, 1fr) 5.6em 6.4em 9em; }
+.pace-head { height: 26px; font-size: 12px; color: #8B8F98; text-transform: uppercase; letter-spacing: .08em; }
+.pace-head span:first-child, .pace-head span:nth-child(n+5) { text-align: right; }  /* line up with the numbers */
+.pace-row { position: relative; height: 38px; margin-bottom: 2px; border-radius: 3px; font-size: 16px;
+  background: #161B24; }
+.pace-row:hover, .pace-row:focus { background: #222937; outline: none; }
+.pace-row:focus-visible { outline: 2px solid #FAFAFA; }
+.pace-rank { font-weight: 700; text-align: right; }
+.pace-bar { height: 22px; border-radius: 2px; }
+.pace-code { font-weight: 800; letter-spacing: .04em; }
+.pace-team { color: #B5B9C1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pace-time { font-weight: 600; text-align: right; }
+.pace-gap { color: #B5B9C1; text-align: right; }
+.pace-finish { text-align: right; white-space: nowrap; }
+.pace-unranked > span:not(.pace-tip) { opacity: .45; }
+.pace-divider { display: flex; align-items: center; gap: 10px; margin: 12px 0 6px; font-size: 12px;
+  color: #8B8F98; text-transform: uppercase; letter-spacing: .08em; }
+.pace-divider::after { content: ""; flex: 1; border-top: 1px solid #3A3F4B; }
+/* The tooltip is always in the page (so screen readers read it) but squeezed out
+   of sight, and shown above the row on hover or keyboard focus. */
+.pace-tip { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%);
+  white-space: nowrap; }
+.pace-row:hover .pace-tip, .pace-row:focus .pace-tip { width: auto; height: auto; clip-path: none;
+  right: 14px; bottom: calc(100% + 4px); z-index: 2; padding: 4px 10px; border-radius: 4px;
+  background: #2E3542; font-size: 13px; box-shadow: 0 2px 8px rgba(0, 0, 0, .5); }
+"""
+
+
+def classification_html(table, title=""):
+    """The race-pace classification as a TV-style timing tower (HTML and CSS).
+
+    One row per driver: rank, team-colour bar, driver code, team, median lap,
+    gap to the fastest median, and where they finished. Clean laps and tyre
+    strategy show in a tooltip on hover (or keyboard focus: every row can be
+    tabbed to), keeping the row itself uncluttered. Unranked drivers sit
+    below a divider, greyed out, with the reason in the last column.
+
+    HTML rather than a Plotly table: a Plotly table can't draw a coloured bar
+    in a row or show a tooltip per row, and looks like a spreadsheet. Every
+    piece of text from the data goes through html.escape, so a team name
+    can't inject HTML into the page. `table` comes from pace.classify.
+    """
+    def row_html(row):
+        ranked = pd.isna(row["reason"])
+        median = analysis.lap_time_text(row["median"]) if pd.notna(row["median"]) else "–"
+        tip = f"{row['clean_laps']} clean laps"
+        if isinstance(row["stints"], list):
+            tip += f" · {pace.stint_text(row['stints'])}"
+        cells = [
+            ("rank", f"{int(row['rank'])}" if ranked else "–"),
+            ("code", row["driver"]),
+            ("team", row["team"]),
+            ("time", median),
+            ("gap", f"+{row['gap']:.3f} s" if ranked else ""),
+            ("finish", pace.finished_text(row)),
+        ]
+        spans = [f'<span class="pace-{name}">{html.escape(str(text))}</span>' for name, text in cells]
+        bar = f'<span class="pace-bar" style="background: {team_colour(row["team_colour"])}"></span>'
+        spans.insert(1, bar)
+        return (f'<div class="pace-row{"" if ranked else " pace-unranked"}" tabindex="0">'
+                + "".join(spans) + f'<span class="pace-tip">{html.escape(tip)}</span></div>')
+
+    ranked = table["reason"].isna()
+    head = "".join(f"<span>{label}</span>" for label in ("Pace", "", "Driver", "Team", "Median", "Gap", "Finished"))
+    parts = [f"<style>{TOWER_CSS}</style>", '<div class="pace-tower">']
+    if title:
+        parts.append(f'<div class="pace-title">{html.escape(title)}</div>')
+    parts.append(f'<div class="pace-head">{head}</div>')
+    parts += [row_html(row) for _, row in table[ranked].iterrows()]
+    if (~ranked).any():
+        parts.append('<div class="pace-divider">Not ranked</div>')
+        parts += [row_html(row) for _, row in table[~ranked].iterrows()]
+    parts.append("</div>")
+    return "\n".join(parts)
+
+
+def lap_time_ticks(low, high, most=9):
+    """Y-axis ticks for lap times: positions (s) and 'm:ss.s' labels from `low` to `high`.
+
+    Plotly can only format numbers, not seconds as minutes, so the labels are
+    made here. The step is the smallest of 0.5, 1, 2, 5... s that gives at most
+    `most` ticks.
+    """
+    step = next((s for s in (0.5, 1, 2, 5, 10, 20, 30) if (high - low) / s <= most), 60)
+    ticks = np.arange(np.ceil(low / step) * step, high + 1e-9, step)  # + 1e-9: keep a tick exactly at `high`
+    return ticks, [f"{int(t // 60)}:{t % 60:04.1f}" for t in ticks]
+
+
+def pace_distribution_figure(table, clean, title=""):
+    """Every driver's clean laps: one box per driver, every lap a dot coloured by tyre compound.
+
+    Boxes are in classification order (fastest median on the left) in team
+    colours; unranked drivers come last, faded, after a dotted line. A box
+    spans the middle half of the laps (25th to 75th percentile) with a line at
+    the median, which is the pace in the classification. Box-plot outlier
+    markers are off, because every clean lap is drawn as a dot anyway. Dots
+    are jittered sideways with a fixed random seed, so they don't jump around
+    each time the page re-runs. `table` and `clean` come from pace.analyse.
+    """
+    order = table[table["driver"].isin(clean["driver"])].reset_index(drop=True)  # drivers with clean laps
+    position = {driver: i for i, driver in enumerate(order["driver"])}
+    fig = go.Figure()
+
+    for i, row in order.iterrows():
+        colour = team_colour(row["team_colour"])
+        times = clean.loc[clean["driver"] == row["driver"], "lap_time_s"]
+        # Unranked drivers are faded, like the greyed-out rows of the timing tower
+        # (plain grey would look like Haas's or Cadillac's team colour).
+        fig.add_trace(go.Box(x=np.full(len(times), i), y=times, name=row["driver"], width=0.6, boxpoints=False,
+                             line=dict(color=colour, width=2), fillcolor=see_through(colour, 0.25),
+                             opacity=1 if pd.isna(row["reason"]) else 0.4, showlegend=False, hoverinfo="skip"))
+
+    rng = np.random.default_rng(0)  # fixed seed: the same "random" spread every time
+    x = clean["driver"].map(position).to_numpy() + rng.uniform(-JITTER, JITTER, len(clean))
+    compounds = clean["compound"].where(clean["compound"].isin(list(COMPOUNDS)), "UNKNOWN")  # missing -> UNKNOWN
+    for compound, (label, colour, symbol) in COMPOUNDS.items():
+        mine = (compounds == compound).to_numpy()
+        if not mine.any():
+            continue  # the key lists only compounds that were used
+        laps = clean[mine]
+        age = laps["tyre_age"].map(lambda a: f"{a:.0f} laps old" if pd.notna(a) else "tyre age unknown")
+        details = np.column_stack([laps["driver"], laps["lap"], laps["lap_time_s"].map(analysis.lap_time_text),
+                                   age])
+        fig.add_trace(go.Scatter(
+            x=x[mine], y=laps["lap_time_s"], mode="markers", name=label, legendgroup=compound, showlegend=False,
+            marker=dict(color=colour, symbol=symbol, size=7, line=dict(color=BACKGROUND, width=0.6)),
+            customdata=details,
+            hovertemplate=f"<b>%{{customdata[0]}}</b> · lap %{{customdata[1]}}<br>%{{customdata[2]}}<br>"
+                          f"{label}, %{{customdata[3]}}<extra></extra>"))
+        # The key: a larger copy of the marker with no data, in the same legend group,
+        # so clicking it in the key hides or shows that compound's dots.
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers", name=label, legendgroup=compound,
+                                 marker=dict(color=colour, symbol=symbol, size=13), hoverinfo="skip"))
+
+    unranked = order["reason"].notna()
+    if unranked.any() and not unranked.all():
+        split = int((~unranked).sum()) - 0.5
+        fig.add_vline(x=split, line=dict(color=MUTED, width=1, dash="dot"))
+        fig.add_annotation(x=split, xanchor="left", y=0, yref="paper", yanchor="bottom", text=" Not ranked",
+                           showarrow=False, font=dict(color=MUTED, size=FONT_SIZE - 3))  # bottom: the key is at the top
+
+    style(fig, title, height=650)
+    ticks, labels = lap_time_ticks(clean["lap_time_s"].min(), clean["lap_time_s"].max())
+    fig.update_layout(hovermode="closest", legend=dict(title=dict(text="Tyre compound ")))
+    fig.update_xaxes(tickvals=list(range(len(order))), ticktext=order["driver"].tolist(),
+                     range=[-0.7, len(order) - 0.3])
+    fig.update_yaxes(tickvals=ticks, ticktext=labels, title=dict(text="Lap time", font=dict(size=FONT_SIZE)))
+    return fig
+
+
 def main(year, place, session_name, name_a, name_b):
     import fastf1
 
@@ -278,9 +479,32 @@ def main(year, place, session_name, name_a, name_b):
     print(f"Colours: {name_a} {colours[0]}, {name_b} {colours[1]}")
 
 
+def race_pace_main(year, place):
+    import data
+
+    session = data.find_session(year, place, "Race")
+    run = pace.analyse(data.race_lap_table(session), data.race_results(session))
+    title = f"{session['year']} {session['location']} race · median pace"
+
+    os.makedirs("output", exist_ok=True)
+    stem = os.path.join("output", f"{year}_{place}_Race_pace".replace(" ", "_"))
+    # The tower is a piece of HTML for the app; on its own it needs a page around it.
+    page = (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><title>{html.escape(title)}</title></head>'
+            f'<body style="background: {BACKGROUND}; margin: 32px;">{classification_html(run["table"], title)}'
+            f"</body></html>")
+    with open(f"{stem}_classification.html", "w", encoding="utf-8") as file:
+        file.write(page)
+    pace_distribution_figure(run["table"], run["clean"], title).write_html(
+        f"{stem}_distribution.html", include_plotlyjs="cdn", config={"displaylogo": False})
+    print(f"Saved {stem}_classification.html and {stem}_distribution.html")
+
+
 if __name__ == "__main__":
     args = sys.argv[1:] or ["2026", "Brazil", "Qualifying", "NOR", "RUS"]
     try:
-        main(int(args[0]), args[1], args[2], args[3], args[4])
+        if len(args) == 2:  # year and place only: race pace
+            race_pace_main(int(args[0]), args[1])
+        else:
+            main(int(args[0]), args[1], args[2], args[3], args[4])
     except LookupError as error:
         sys.exit(str(error))
