@@ -55,3 +55,15 @@ def test_lap_time_tick_labels():
     assert labels == ["1:15.0", "1:20.0", "1:25.0", "1:30.0"]
     ticks, labels = charts.lap_time_ticks(59.6, 61.4)  # across a whole minute: every 0.5 s
     assert labels == ["1:00.0", "1:00.5", "1:01.0"]
+
+
+def test_driver_names_link_to_their_laps():
+    url = "driver?race=11412&driver={}"
+    page = charts.classification_html(tower_table(), driver_url=url)
+    assert 'href="driver?race=11412&amp;driver=NOR" target="_blank"' in page  # & escaped inside the attribute
+    assert 'tabindex' not in page                                            # the links take keyboard focus
+    assert "<a " not in charts.classification_html(tower_table())            # no address, no links
+    clean = pd.DataFrame({"driver": ["NOR", "VER"], "lap": [2, 2], "lap_time_s": [76.1, 76.7],
+                          "compound": ["SOFT", "SOFT"], "tyre_age": [1, 1]})
+    ticks = charts.pace_distribution_figure(tower_table(), clean, driver_url=url).layout.xaxis.ticktext
+    assert ticks[0] == '<a href="driver?race=11412&amp;driver=NOR" target="_blank">NOR</a>'

@@ -456,6 +456,9 @@ def build_race_laps(laps, drivers, stints, pits, control):
       pit_out      the lap started in the pit lane
       neutralised  any part of the lap was run under a safety car, VSC or red
                    flag (see neutralised_periods)
+      sector_1_s, sector_2_s, sector_3_s
+                   sector times in seconds (empty if not timed, e.g. sector 1
+                   of lap 1); pace.py doesn't use them, the driver laps screen does
     """
     code = dict(zip(drivers["driver_number"], drivers["name_acronym"]))
     table = pd.DataFrame({
@@ -464,6 +467,7 @@ def build_race_laps(laps, drivers, stints, pits, control):
         "lap": laps["lap_number"].astype(int),
         "lap_time_s": laps["lap_duration"].astype(float),
         "pit_out": laps["is_pit_out_lap"].eq(True),  # True/False; a missing value counts as False
+        **{f"sector_{n}_s": laps[f"duration_sector_{n}"].astype(float) for n in (1, 2, 3)},
     })
 
     # Tyres: OpenF1 gives one row per stint (laps lap_start to lap_end on one set),
@@ -493,7 +497,8 @@ def build_race_laps(laps, drivers, stints, pits, control):
         neutralised |= (starts <= finish) & (ends >= begin)
     table["neutralised"] = neutralised.to_numpy()  # same row order as `laps` (a left merge keeps it)
 
-    columns = ["driver", "lap", "lap_time_s", "compound", "tyre_age", "pit_in", "pit_out", "neutralised"]
+    columns = ["driver", "lap", "lap_time_s", "compound", "tyre_age", "pit_in", "pit_out", "neutralised",
+               "sector_1_s", "sector_2_s", "sector_3_s"]
     return table[columns].sort_values(["driver", "lap"]).reset_index(drop=True)
 
 

@@ -311,16 +311,18 @@ TOWER_CSS = """
 .pace-head span:first-child, .pace-head span:nth-child(n+5) { text-align: right; }  /* line up with the numbers */
 .pace-row { position: relative; height: 38px; margin-bottom: 2px; border-radius: 3px; font-size: 16px;
   background: #161B24; }
-.pace-row:hover, .pace-row:focus { background: #222937; outline: none; }
+.pace-row:hover, .pace-row:focus-within { background: #222937; outline: none; }
 .pace-row:focus-visible { outline: 2px solid #FAFAFA; }
 .pace-rank { font-weight: 700; text-align: right; }
 .pace-bar { height: 22px; border-radius: 2px; }
 .pace-code { font-weight: 800; letter-spacing: .04em; }
+.pace-tower a.pace-code { color: inherit; text-decoration: none; }
+.pace-tower a.pace-code:hover, .pace-tower a.pace-code:focus-visible { text-decoration: underline; }
 .pace-team { color: #B5B9C1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pace-time { font-weight: 600; text-align: right; }
 .pace-gap { color: #B5B9C1; text-align: right; }
 .pace-finish { text-align: right; white-space: nowrap; }
-.pace-unranked > span:not(.pace-tip) { opacity: .45; }
+.pace-unranked > :not(.pace-tip) { opacity: .45; }
 .pace-divider { display: flex; align-items: center; gap: 10px; margin: 12px 0 6px; font-size: 12px;
   color: #8B8F98; text-transform: uppercase; letter-spacing: .08em; }
 .pace-divider::after { content: ""; flex: 1; border-top: 1px solid #3A3F4B; }
@@ -328,20 +330,25 @@ TOWER_CSS = """
    of sight, and shown above the row on hover or keyboard focus. */
 .pace-tip { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%);
   white-space: nowrap; }
-.pace-row:hover .pace-tip, .pace-row:focus .pace-tip { width: auto; height: auto; clip-path: none;
+.pace-row:hover .pace-tip, .pace-row:focus-within .pace-tip { width: auto; height: auto; clip-path: none;
   right: 14px; bottom: calc(100% + 4px); z-index: 2; padding: 4px 10px; border-radius: 4px;
   background: #2E3542; font-size: 13px; box-shadow: 0 2px 8px rgba(0, 0, 0, .5); }
 """
 
 
-def classification_html(table, title=""):
+def classification_html(table, title="", driver_url=None):
     """The race-pace classification as a TV-style timing tower (HTML and CSS).
 
     One row per driver: rank, team-colour bar, driver code, team, median lap,
     gap to the fastest median, and where they finished. Clean laps and tyre
-    strategy show in a tooltip on hover (or keyboard focus: every row can be
-    tabbed to), keeping the row itself uncluttered. Unranked drivers sit
-    below a divider, greyed out, with the reason in the last column.
+    strategy show in a tooltip on hover (or keyboard focus: every row, or its
+    driver link, can be tabbed to), keeping the row itself uncluttered.
+    Unranked drivers sit below a divider, greyed out, with the reason in the
+    last column.
+
+    `driver_url`, e.g. "driver?race=11412&driver={}", turns each driver code
+    into a link to that address (opened in a new tab, so this page keeps its
+    choices); {} becomes the code. Without it the codes are plain text.
 
     HTML rather than a Plotly table: a Plotly table can't draw a coloured bar
     in a row or show a tooltip per row, and looks like a spreadsheet. Every
@@ -363,9 +370,15 @@ def classification_html(table, title=""):
             ("finish", pace.finished_text(row)),
         ]
         spans = [f'<span class="pace-{name}">{html.escape(str(text))}</span>' for name, text in cells]
+        if driver_url:
+            href = html.escape(driver_url.format(row["driver"]))
+            spans[1] = (f'<a class="pace-code" href="{href}" target="_blank" rel="noopener">'
+                        f'{html.escape(row["driver"])}</a>')
         bar = f'<span class="pace-bar" style="background: {team_colour(row["team_colour"])}"></span>'
         spans.insert(1, bar)
-        return (f'<div class="pace-row{"" if ranked else " pace-unranked"}" tabindex="0">'
+        # Without links, the row itself takes keyboard focus (to show its tooltip); with links, the link does.
+        focus = "" if driver_url else ' tabindex="0"'
+        return (f'<div class="pace-row{"" if ranked else " pace-unranked"}"{focus}>'
                 + "".join(spans) + f'<span class="pace-tip">{html.escape(tip)}</span></div>')
 
     ranked = table["reason"].isna()
@@ -394,7 +407,7 @@ def lap_time_ticks(low, high, most=9):
     return ticks, [f"{int(t // 60)}:{t % 60:04.1f}" for t in ticks]
 
 
-def pace_distribution_figure(table, clean, title=""):
+def pace_distribution_figure(table, clean, title="", driver_url=None):
     """Every driver's clean laps: one box per driver, every lap a dot coloured by tyre compound.
 
     Boxes are in classification order (fastest median on the left) in team
@@ -404,6 +417,7 @@ def pace_distribution_figure(table, clean, title=""):
     markers are off, because every clean lap is drawn as a dot anyway. Dots
     are jittered sideways with a fixed random seed, so they don't jump around
     each time the page re-runs. `table` and `clean` come from pace.analyse.
+    `driver_url` links the driver codes under the boxes, as in classification_html.
     """
     order = table[table["driver"].isin(clean["driver"])].reset_index(drop=True)  # drivers with clean laps
     position = {driver: i for i, driver in enumerate(order["driver"])}
@@ -450,8 +464,10 @@ def pace_distribution_figure(table, clean, title=""):
     style(fig, title, height=650)
     ticks, labels = lap_time_ticks(clean["lap_time_s"].min(), clean["lap_time_s"].max())
     fig.update_layout(hovermode="closest", legend=dict(title=dict(text="Tyre compound ")))
-    fig.update_xaxes(tickvals=list(range(len(order))), ticktext=order["driver"].tolist(),
-                     range=[-0.7, len(order) - 0.3])
+    codes = order["driver"].tolist()
+    if driver_url:  # Plotly draws <a href> in tick labels as links
+        codes = [f'<a href="{html.escape(driver_url.format(c))}" target="_blank">{html.escape(c)}</a>' for c in codes]
+    fig.update_xaxes(tickvals=list(range(len(order))), ticktext=codes, range=[-0.7, len(order) - 0.3])
     fig.update_yaxes(tickvals=ticks, ticktext=labels, title=dict(text="Lap time", font=dict(size=FONT_SIZE)))
     return fig
 

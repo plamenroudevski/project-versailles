@@ -36,6 +36,7 @@ their pace really was. That's why retirements aren't ranked.
 
 import sys
 
+import numpy as np
 import pandas as pd
 
 from analysis import lap_time_text
@@ -105,6 +106,20 @@ def sigma_filter(laps, sigma=SIGMA):
 def clean_laps(laps):
     """Steps 1 and 2 together: the laps each driver's pace is measured on."""
     return sigma_filter(racing_laps(laps))
+
+
+def why_not_counted(laps):
+    """For every lap, why it doesn't count towards the driver's pace, or None if it does.
+
+    The reasons follow steps 1 and 2 in order, so a lap 1 that was also under
+    a safety car says "Lap 1". The rows line up with `laps`.
+    """
+    reasons = np.select(
+        [laps["lap"] == 1, laps["lap_time_s"].isna(), laps["pit_in"], laps["pit_out"], laps["neutralised"],
+         ~laps.index.isin(clean_laps(laps).index)],
+        ["Lap 1", "No lap time", "Pit in-lap", "Pit out-lap", "SC/VSC/red flag", f"Outside ±{SIGMA:g}σ"],
+        default=None)
+    return pd.Series(reasons, index=laps.index)
 
 
 def stints(laps):

@@ -38,6 +38,16 @@ def test_step_one_drops_laps_that_werent_racing():
     assert pace.racing_laps(laps)["lap"].tolist() == [2, 3, 8]
 
 
+def test_every_lap_says_why_it_does_or_doesnt_count():
+    # Lap 1, an in-lap, an out-lap, a safety-car lap, no time, ten good laps, and one 84.0 s mistake.
+    times = [95.0, 99.0, 100.0, 110.0, np.nan] + [80.0 + 0.1 * i for i in range(10)] + [84.0]
+    laps = driver_laps("NOR", times, first_lap=1, pit_in=[2], pit_out=[3], neutralised=[1, 4])
+    reasons = pace.why_not_counted(laps).tolist()
+    assert reasons[:5] == ["Lap 1", "Pit in-lap", "Pit out-lap", "SC/VSC/red flag", "No lap time"]  # lap 1 wins
+    assert reasons[5:15] == [None] * 10                                                          # counted
+    assert reasons[15] == "Outside ±2σ"
+
+
 def test_neutralised_laps_are_removed_before_the_sigma_filter():
     # Ten racing laps 80.0, 80.1 ... 80.9, one slow racing lap (84.0, a mistake),
     # and four safety-car laps at 110 s.

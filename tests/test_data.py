@@ -164,7 +164,9 @@ def test_build_race_laps():
 
     laps = pd.DataFrame({"driver_number": [4] * 4 + [81] * 4, "lap_number": [1, 2, 3, 4] * 2,
                          "date_start": stamps(0) + stamps(1), "lap_duration": 100.0,
-                         "is_pit_out_lap": [False, False, False, True, False, False, True, None]})
+                         "is_pit_out_lap": [False, False, False, True, False, False, True, None],
+                         "duration_sector_1": [None] + [30.0] * 7, "duration_sector_2": 40.0,
+                         "duration_sector_3": 30.0})
     drivers = pd.DataFrame({"driver_number": [4, 81], "name_acronym": ["NOR", "PIA"]})
     stints = pd.DataFrame({"driver_number": [4, 81, 81], "lap_start": [1, 1, 3], "lap_end": [4, 2, None],
                            "compound": ["MEDIUM", "MEDIUM", "HARD"], "tyre_age_at_start": [3, 0, 0]})
@@ -181,6 +183,8 @@ def test_build_race_laps():
     assert nor["pit_in"].tolist() == [False, False, True, False]      # the lap before NOR's out-lap
     assert pia["pit_out"].tolist() == [False, False, True, False]     # a missing value counts as False
     assert nor["neutralised"].tolist() == pia["neutralised"].tolist() == [False, True, False, False]
+    assert nor["sector_1_s"].isna().tolist() == [True, False, False, False]   # lap 1's first sector isn't timed
+    assert pia[["sector_1_s", "sector_2_s", "sector_3_s"]].iloc[0].tolist() == [30.0, 40.0, 30.0]
 
 
 def test_build_results_statuses():

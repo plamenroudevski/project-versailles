@@ -15,6 +15,8 @@ Two pages, listed at the top of the sidebar:
 - Race pace: sidebar pickers (year -> event; the race is picked
   automatically), then a summary, your notes, and the classification or
   the lap-time distribution.
+- Driver laps (not in the sidebar): every lap of one driver's race with
+  sector times, opened by clicking a driver's name on the Race pace page.
 
 The pages use Streamlit's multipage navigation (st.navigation), not a page
 selector widget: each page gets its own address (/ and /race-pace) and its
@@ -96,13 +98,15 @@ def comparison(session_key, name_a, name_b, lap_a, lap_b):
 
 @st.cache_data(ttl=CACHE_TTL_S, max_entries=20, show_spinner="Loading every lap of the race...")
 def race_pace(session_key):
-    """The race's session details and pace.analyse() result, remembered per race.
+    """The race's session details, every lap, and pace.analyse() result, remembered per race.
 
     The finished result is cached, not just the downloads: switching between
-    the two views, or coming back to a race, costs no requests and no maths.
+    the two views, coming back to a race, or opening a driver's laps costs no
+    requests and no maths.
     """
     session = data.get_session(session_key)
-    return {"session": session, "run": pace.analyse(data.race_lap_table(session), data.race_results(session)),
+    laps = data.race_lap_table(session)
+    return {"session": session, "laps": laps, "run": pace.analyse(laps, data.race_results(session)),
             "rain": data.session_had_rain(session_key)}
 
 
@@ -314,7 +318,8 @@ def race_pace_page():
         names = [] if event_sessions.empty else event_sessions["session_name"].tolist()
         if "Race" not in names:
             stop("This event has no race yet: it hasn't started, or it was cancelled. Pick another event.")
-        run = race_pace(int(event_sessions["session_key"].iloc[names.index("Race")]))
+        session_key = int(event_sessions["session_key"].iloc[names.index("Race")])
+        run = race_pace(session_key)
     except LookupError as error:  # data.py's "missing data" messages are written for you
         stop(str(error), st.warning)
     except requests.RequestException as error:
@@ -336,16 +341,66 @@ def race_pace_page():
     # Your notes for this race, e.g. notes/2026_sao_paulo_R_pace.md ("pace" in place of a driver pair).
     show_notes(data.notes_path(session, ("pace",)))
 
+    # Driver names link to the driver laps page for this race ({} becomes the driver's code).
+    driver_url = f"driver?race={session_key}&driver={{}}"
     # required=True: one view is always chosen (clicking the chosen one again doesn't clear it).
     view = st.segmented_control("View", VIEWS, default=VIEWS[0], required=True, label_visibility="collapsed")
     if view == VIEWS[0]:
         # charts.py escapes every piece of text from the data before it reaches this HTML.
-        st.html(charts.classification_html(result["table"]))
-        st.caption("Hover over a driver (or tab to them) for their clean-lap count and tyre strategy.")
+        st.html(charts.classification_html(result["table"], driver_url=driver_url))
+        st.caption("Hover over a driver (or tab to them) for their clean-lap count and tyre strategy. "
+                   "Click a driver's name to open every lap of their race in a new tab.")
     else:
-        st.plotly_chart(charts.pace_distribution_figure(result["table"], result["clean"]), theme=None,
-                        config={"displaylogo": False})
-        st.caption("Each dot is one clean lap: hover for its details. Click a compound in the key to hide or show it.")
+        st.plotly_chart(charts.pace_distribution_figure(result["table"], result["clean"], driver_url=driver_url),
+                        theme=None, config={"displaylogo": False})
+        st.caption("Each dot is one clean lap: hover for its details. Click a compound in the key to hide or show "
+                   "it, or a driver's name to open every lap of their race in a new tab.")
+
+
+# ---- Page 3 (hidden): every lap of one driver's race -------------------------------------
+
+def driver_laps_page():
+    """Every lap of one driver's race, counted or not, with its sector times.
+
+    Opened from a driver's name on the Race pace page, in a new tab, so that
+    page keeps its choices. The address says which race and driver
+    (driver?race=11412&driver=NOR), so the page stands on its own. Not listed
+    in the sidebar.
+    """
+    try:
+        session_key, driver = int(st.query_params["race"]), st.query_params["driver"]
+    except (KeyError, ValueError):  # address typed by hand, missing a part or with a non-number race
+        stop("Open this page by clicking a driver's name on the Race pace page.")
+    try:
+        run = race_pace(session_key)  # already remembered from the Race pace page: no new downloads
+    except LookupError as error:
+        stop(str(error), st.warning)
+    except requests.RequestException as error:
+        stop(f"Couldn't reach OpenF1 ({error}). Try again in a minute.", st.error)
+
+    laps, table = run["laps"], run["run"]["table"]
+    mine = laps[laps["driver"] == driver]
+    if mine.empty:  # the driver code comes from the address, so it's only shown once it's known to be real
+        stop("No laps for that driver in this race. Open this page by clicking a driver's name on the Race pace page.")
+    reasons = pace.why_not_counted(laps).loc[mine.index]  # over the whole field: the 2σ filter needs each driver's laps
+    row = table[table["driver"] == driver].iloc[0]
+
+    session = run["session"]
+    st.subheader(f"{driver} · {session['year']} {session['location']} race: every lap")
+    median = f" (median {analysis.lap_time_text(row['median'])})" if pd.notna(row["median"]) else ""
+    st.caption(f"{row['team']} · {pace.finished_text(row)} · {int(reasons.isna().sum())} of {len(mine)} laps "
+               f"count towards the race pace{median}.")
+
+    shown = pd.DataFrame({
+        "Lap": mine["lap"],
+        "Lap time": mine["lap_time_s"].map(lambda t: analysis.lap_time_text(t) if pd.notna(t) else None),
+        **{f"Sector {n}": mine[f"sector_{n}_s"] for n in (1, 2, 3)},
+        "Counted": reasons.map(lambda reason: "Yes" if reason is None else f"No: {reason}"),
+    })
+    sector = st.column_config.NumberColumn(format="%.3f")  # seconds, to the thousandth like the timing screens
+    st.dataframe(shown, hide_index=True, height=35 * (len(shown) + 1) + 3,  # tall enough to show every lap
+                 column_config={f"Sector {n}": sector for n in (1, 2, 3)})
+    st.caption(f"Counted: used for the median race pace. {pace.FILTER_RULE}")
 
 
 # ---- Navigation -------------------------------------------------------------------------
@@ -353,4 +408,5 @@ def race_pace_page():
 st.navigation([
     st.Page(qualifying_page, title="Qualifying", icon=":material/timer:", default=True),
     st.Page(race_pace_page, title="Race pace", icon=":material/leaderboard:", url_path="race-pace"),
+    st.Page(driver_laps_page, title="Driver laps", icon=":material/table:", url_path="driver", visibility="hidden"),
 ]).run()
