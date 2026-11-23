@@ -1,6 +1,6 @@
-# Project Versailles: F1 qualifying telemetry analyser
+# Project Versailles: F1 qualifying telemetry and race pace analyser
 
-Compares two drivers' qualifying laps from real F1 telemetry and shows **where** one gains or loses time and the **likely reason**, corner by corner.
+Compares two drivers' qualifying laps from real F1 telemetry and shows **where** one gains or loses time and the **likely reason**, corner by corner. A second page, **Race pace**, ranks every driver in a race by their median lap time over clean racing laps: who was actually fastest, as opposed to who finished where ([method below](#race-pace-method)).
 
 **Live app: https://project-versailles.streamlit.app/** (any session from 2023 onwards; the app sleeps when unused, so the first visit can take a minute)
 
@@ -48,6 +48,28 @@ A track map colours 25 mini-sectors by the faster driver and labels every corner
 
 Every threshold lives in one commented `CONFIG` block at the top of [`analysis.py`](analysis.py). The full walk-through is in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 
+## Race pace method
+
+The **Race pace** page answers one question: *who was fastest over the race?* It ranks drivers by the **median of their clean racing laps** and shows how their lap times are spread. The interesting output is a gap between pace and result: 2026 São Paulo, Leclerc finished P8 but was 13th on pace; Gasly was 9th on pace but finished P14.
+
+![Race pace classification, 2026 São Paulo Grand Prix](docs/race_pace.png)
+
+1. **Data.** Each OpenF1 endpoint is fetched once for the whole field, not once per driver: lap times (`laps`), tyre compound and age (`stints`), pit stops (`pit`, plus `is_pit_out_lap`), safety car, VSC and red flags (`race_control`), result and retirements (`session_result`).
+2. **Remove laps that weren't racing:** lap 1, pit in- and out-laps, laps with no time, and any lap that overlaps a safety-car, VSC or red-flag period. Periods are matched to laps by clock time, like deleted laps. A period runs from "DEPLOYED", "RED FLAG" or "SESSION ABORTED" to the first restart message ("TRACK CLEAR", "VSC ENDING", "SESSION STARTED" or the chequered flag). The first of any kind, because messages go missing: 2026 Monza and Mexico City each have a safety car that never posts "IN THIS LAP". Checked on all 91 races since 2023.
+3. **±2σ filter, per driver, one pass:** keep laps within 2 standard deviations of that driver's mean. Step 2 must come first: 40 racing laps at 75 s plus 10 safety-car laps at 110 s give σ = 14 s and a window up to 110.3 s, so the safety-car laps (and every bad racing lap) would survive.
+4. **Pace = median** of the clean laps, ranked fastest first, with the gap to the fastest median. The median, so one slow lap left over can't drag it.
+5. **Not ranked:** retirements, and drivers with fewer than 10 clean laps. They're listed below the ranking, greyed out, with the reason (`DNF · lap 31`) and their median for reference.
+6. **No fuel correction, deliberately.** A finisher's laps run from full tank to empty, so their median lap sits near half fuel, the same for every finisher. A retirement only has heavy-fuel laps, which is why retirements aren't ranked.
+7. **Summary:** the biggest over- and underperformer (finishing order against pace order, among ranked drivers), the largest and smallest teammate gap, and the most consistent driver by interquartile range: the spread of the middle half of their laps, so one odd lap can't decide it.
+
+Two views: a TV-style timing tower (hover a row for clean laps and tyre strategy) and a box plot of every driver's clean laps, each lap a dot in its tyre's colour. Thresholds live in the `CONFIG` block of [`pace.py`](pace.py). `python pace.py 2026 Brazil` prints the same ranking and summary.
+
+**Limits of the race pace method**
+- **Wet or mixed races.** Laps on intermediates and slicks are pooled. 2026 São Paulo started and finished on intermediates, so every driver's laps spread over ~10 s, the 2σ step removes almost nothing (5 of 1,298 laps), and ranks partly reflect how many wet laps each driver did. Ranking on slick laps alone would change 17 of 21 ranks. The page shows a rain warning.
+- **After a red-flag restart,** cars can follow the safety car for a lap or two with no race-control message. Step 1 can't see those laps. The 2σ filter removed 96 of the 98 in the three 2026 races with one (Monza, Mexico City, Monaco); two Monza laps of ~126 s survived and nudge those two drivers' medians.
+- **Pace rank ignores strategy, traffic, damage and tyre age,** so the summary is worded as pointers, not verdicts.
+- Race sessions only: no sprints or practice long runs yet.
+
 ## Limitations
 
 - **One lap proves nothing on its own.** Findings describe *this* lap; traffic, tyre preparation or a mistake can dominate.
@@ -71,18 +93,19 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Terminal tools: `python analysis.py` (zone table and findings), `python charts.py` (HTML charts in `output/`), `python check_session.py` (which channels a session provides). Each takes `YEAR PLACE SESSION A B`, e.g. `2026 Brazil Qualifying NOR RUS`.
+Terminal tools: `python analysis.py` (zone table and findings), `python charts.py` (HTML charts in `output/`), `python check_session.py` (which channels a session provides). Each takes `YEAR PLACE SESSION A B`, e.g. `2026 Brazil Qualifying NOR RUS`. For race pace, give just `YEAR PLACE`: `python pace.py 2026 Brazil` (ranking and summary), `python charts.py 2026 Brazil` (timing tower and box plot in `output/`).
 
-**Your own notes:** add Markdown files in `notes/` (the app creates an empty one with one click when run locally). They show under the findings, and online once committed.
+**Your own notes:** add Markdown files in `notes/` (the app creates an empty one with one click when run locally). They show under the findings, and online once committed. Race pace notes use `pace` in place of the driver pair, e.g. `notes/2026_sao_paulo_R_pace.md`.
 
 ## Project layout
 
 | File | Role |
 |---|---|
-| [`data.py`](data.py) | Fetching and caching (OpenF1, MultiViewer), deleted laps, notes files |
-| [`analysis.py`](analysis.py) | The analysis engine: pure functions, runnable from a script |
-| [`charts.py`](charts.py) | Plotly figures |
-| [`app.py`](app.py) | Streamlit user interface only |
+| [`data.py`](data.py) | Fetching and caching (OpenF1, MultiViewer), deleted laps, race lap tables, notes files |
+| [`analysis.py`](analysis.py) | The qualifying analysis engine: pure functions, runnable from a script |
+| [`pace.py`](pace.py) | The race pace engine: pure functions on a plain lap table, runnable from a script |
+| [`charts.py`](charts.py) | Plotly figures and the race pace timing tower (HTML) |
+| [`app.py`](app.py) | Streamlit user interface only: the Qualifying and Race pace pages |
 | [`check_session.py`](check_session.py) | Reports which telemetry channels a session actually has |
 | [`tests/`](tests) | pytest, using made-up laps with hand-checked answers |
 
@@ -91,7 +114,7 @@ Run the tests with `python -m pytest`.
 ## Next (out of scope for v1)
 
 - Live timing
-- Race pace and tyre degradation
+- Tyre degradation and fuel correction; sprint and practice long-run pace
 - Comparing more than two drivers
 - User accounts
 - Databases
