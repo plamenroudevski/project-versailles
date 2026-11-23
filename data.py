@@ -131,7 +131,9 @@ def get_session(session_key):
 
 def started(table):
     """Keep only rows whose date_start is in the past: future sessions have no data yet."""
-    return table[pd.to_datetime(table["date_start"], format="ISO8601") <= pd.Timestamp.now(tz="UTC")]
+    # utc=True: an empty table (an event whose sessions were all cancelled, like 2026's April
+    # Bahrain GP) has no time zone to read, and can't be compared with a UTC time without it.
+    return table[pd.to_datetime(table["date_start"], format="ISO8601", utc=True) <= pd.Timestamp.now(tz="UTC")]
 
 
 def list_events(year):
@@ -383,6 +385,164 @@ def session_had_rain(session_key):
     """True if the weather station reported rain at any point in the session."""
     weather = openf1("weather", session_key=session_key)
     return bool(not weather.empty and weather["rainfall"].any())
+
+
+# ---- Races: the lap table and results for pace.py ------------------------------------
+
+def neutralised_periods(control):
+    """When the race was neutralised (safety car, virtual safety car or red flag), as (start, end) times in UTC.
+
+    Race control posts a message when each one starts and when it ends:
+      starts: "SAFETY CAR DEPLOYED", "VSC DEPLOYED" (before 2026: "VIRTUAL SAFETY
+              CAR DEPLOYED"), "RED FLAG", and "SESSION ABORTED" (2026 red flags
+              only post this one)
+      ends:   "TRACK CLEAR" or a green light for the whole track (the restart),
+              "VSC ENDING", "SESSION STARTED" (racing resumes after a red flag),
+              and the chequered flag
+    A period runs from the first start message to the first end message after
+    it. Starts while a period is already open are part of it (a VSC turned into
+    a safety car, a red flag shown during a safety car).
+
+    Why the first end message of any kind: messages go missing. 2026 Monza and
+    Mexico City have a "SAFETY CAR DEPLOYED" with no "SAFETY CAR IN THIS LAP",
+    and older years have fewer "VSC ENDING" messages than "VSC DEPLOYED". Waiting
+    for a matching message would leave the rest of the race neutralised.
+    "SAFETY CAR IN THIS LAP" isn't an end: the safety car is still out until
+    the restart, which "TRACK CLEAR" marks a minute or two later.
+
+    Known gap: after a red-flag restart, cars can follow the safety car for a
+    lap or two with no message at all (2026 Monza, Mexico City, Monaco). Those
+    laps aren't marked here. They're 10-130 % slower than racing laps, so
+    pace.py's 2-sigma filter removes most of them: 96 of 98 in those three
+    races. Two survived (Alonso's and Stroll's lap 6 at Monza, ~126 s against
+    ~85 s racing laps).
+    """
+    if control.empty:
+        return []
+    message, flag = control["message"].fillna(""), control["flag"].fillna("")
+    safety_car = control["category"] == "SafetyCar"
+    whole_track = control["scope"] == "Track"
+    starts = ((safety_car & message.str.contains("DEPLOYED")) | (flag == "RED")
+              | (message == "SESSION ABORTED"))
+    ends = ((whole_track & flag.isin(["CLEAR", "GREEN"])) | (safety_car & message.str.contains("ENDING"))
+            | (message == "SESSION STARTED") | (flag == "CHEQUERED"))
+
+    events = pd.DataFrame({"date": pd.to_datetime(control["date"], format="ISO8601"), "start": starts, "end": ends})
+    periods, opened = [], None
+    for date, start, end in events[starts | ends].sort_values("date").itertuples(index=False):
+        if start and opened is None:
+            opened = date
+        elif end and opened is not None:
+            periods.append((opened, date))
+            opened = None
+    if opened is not None:  # still neutralised when the data ends (a race in progress)
+        periods.append((opened, pd.Timestamp.max.tz_localize("UTC")))
+    return periods
+
+
+def build_race_laps(laps, drivers, stints, pits, control):
+    """Turn OpenF1's race tables into the plain lap table pace.py reads.
+
+    Kept apart from the downloads (race_lap_table) so it can be tested without
+    internet. One row per driver per lap:
+      driver       three-letter code, e.g. NOR
+      lap          lap number (1 = the start)
+      lap_time_s   lap time in seconds; empty if the lap has no time
+      compound     "SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET"; empty if
+                   OpenF1 has no tyre data for that lap (never guessed)
+      tyre_age     laps the set had already done when this lap began (OpenF1
+                   counts a stint's tyre age the same way)
+      pit_in       the driver came into the pits at the end of this lap
+      pit_out      the lap started in the pit lane
+      neutralised  any part of the lap was run under a safety car, VSC or red
+                   flag (see neutralised_periods)
+    """
+    code = dict(zip(drivers["driver_number"], drivers["name_acronym"]))
+    table = pd.DataFrame({
+        "driver_number": laps["driver_number"].astype(int),
+        "driver": laps["driver_number"].map(code),
+        "lap": laps["lap_number"].astype(int),
+        "lap_time_s": laps["lap_duration"].astype(float),
+        "pit_out": laps["is_pit_out_lap"].eq(True),  # True/False; a missing value counts as False
+    })
+
+    # Tyres: OpenF1 gives one row per stint (laps lap_start to lap_end on one set),
+    # so spread each stint over its laps. A stint still running has no lap_end yet.
+    last_lap = int(table["lap"].max())
+    tyres = pd.DataFrame(
+        [(s.driver_number, lap, s.compound, s.tyre_age_at_start + lap - s.lap_start)
+         for s in stints.itertuples()
+         for lap in range(int(s.lap_start), int(s.lap_end if pd.notna(s.lap_end) else last_lap) + 1)],
+        columns=["driver_number", "lap", "compound", "tyre_age"]).astype({"driver_number": int, "lap": int})
+    table = table.merge(tyres.drop_duplicates(["driver_number", "lap"], keep="last"),
+                        on=["driver_number", "lap"], how="left")
+
+    # In-laps: the pit endpoint names each stop's lap. The lap before a pit out-lap
+    # is an in-lap too, which covers a stop the pit endpoint missed.
+    stops = set() if pits.empty else set(zip(pits["driver_number"].astype(int), pits["lap_number"].astype(int)))
+    before_out = set(zip(table.loc[table["pit_out"], "driver_number"], table.loc[table["pit_out"], "lap"] - 1))
+    table["pit_in"] = [key in stops or key in before_out for key in zip(table["driver_number"], table["lap"])]
+
+    # A lap is neutralised if it overlaps a period at all: started before the period
+    # ended and ended after it started. Laps with no time have no end, so never match
+    # (pace.py drops them anyway).
+    starts = pd.to_datetime(laps["date_start"], format="ISO8601").reset_index(drop=True)
+    ends = starts + pd.to_timedelta(laps["lap_duration"].to_numpy(), unit="s")
+    neutralised = pd.Series(False, index=starts.index)
+    for begin, finish in neutralised_periods(control):
+        neutralised |= (starts <= finish) & (ends >= begin)
+    table["neutralised"] = neutralised.to_numpy()  # same row order as `laps` (a left merge keeps it)
+
+    columns = ["driver", "lap", "lap_time_s", "compound", "tyre_age", "pit_in", "pit_out", "neutralised"]
+    return table[columns].sort_values(["driver", "lap"]).reset_index(drop=True)
+
+
+def race_lap_table(session):
+    """Download one race's laps, tyres, pit stops and race control, and build pace.py's lap table.
+
+    Each endpoint is fetched once for the whole field (not once per driver), as
+    the free tier allows 30 requests a minute for every visitor together.
+    """
+    key = int(session["session_key"])
+    laps = openf1("laps", session_key=key)
+    if laps.empty:
+        raise LookupError("OpenF1 has no lap times for this race yet. If it has only just finished, "
+                          "try again in about 10 minutes.")
+    drivers = openf1("drivers", session_key=key).drop_duplicates("driver_number")
+    return build_race_laps(laps, drivers, openf1("stints", session_key=key), openf1("pit", session_key=key),
+                           openf1("race_control", session_key=key))
+
+
+def build_results(results, drivers):
+    """One row per driver: driver, team, team_colour, position, status, laps.
+
+    status is "Finished", "DNF" (retired), "DNS" (didn't start), "DSQ"
+    (disqualified), or "No result" if the driver is missing from the results.
+    position is the official finishing position (empty if not classified);
+    laps is how many laps they completed.
+    """
+    table = drivers[["driver_number", "name_acronym", "team_name", "team_colour"]].merge(
+        results[["driver_number", "position", "number_of_laps", "dnf", "dns", "dsq"]], on="driver_number", how="left")
+    status = np.select([table["dsq"] == True, table["dns"] == True, table["dnf"] == True,  # noqa: E712 (may be empty)
+                        table["position"].notna()], ["DSQ", "DNS", "DNF", "Finished"], default="No result")
+    return pd.DataFrame({"driver": table["name_acronym"], "team": table["team_name"],
+                         "team_colour": table["team_colour"], "position": table["position"],
+                         "status": status, "laps": table["number_of_laps"]})
+
+
+def race_results(session):
+    """Download one race's official result (OpenF1's session_result) with each driver's team.
+
+    session_result exists for every race OpenF1 has since 2023 (checked
+    November 2026: the only races without one were cancelled), so there's no
+    fallback; a race that has only just finished gets a "try again" message.
+    """
+    key = int(session["session_key"])
+    results = openf1("session_result", session_key=key)
+    if results.empty:
+        raise LookupError("OpenF1 hasn't published this race's result yet. If it has only just finished, "
+                          "try again in about 10 minutes.")
+    return build_results(results, openf1("drivers", session_key=key).drop_duplicates("driver_number"))
 
 
 # ---- Your notes ------------------------------------------------------------------

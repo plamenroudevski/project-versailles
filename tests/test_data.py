@@ -23,6 +23,14 @@ def test_find_session_with_several_matches(monkeypatch):
         data.find_session(2026, "United States", "Day 1")                     # different places: ask for the city
 
 
+def test_event_with_every_session_cancelled_has_no_sessions(monkeypatch):
+    # 2026's April Bahrain GP: all five sessions cancelled. Used to crash comparing an empty date column.
+    sessions = pd.DataFrame({"session_key": [1, 2], "session_name": ["Qualifying", "Race"], "is_cancelled": True,
+                             "date_start": ["2026-04-11T16:00:00+00:00", "2026-04-12T15:00:00+00:00"]})
+    monkeypatch.setattr(data, "openf1", lambda endpoint, **params: sessions)
+    assert data.list_sessions(1282).empty
+
+
 def test_laps_get_their_qualifying_part():
     # 2026 São Paulo: Q1 started at 18:00, was red-flagged and restarted at 19:26; Q2 at 19:49; Q3 at 20:14.
     control = pd.DataFrame({
@@ -61,6 +69,10 @@ def test_notes_file_name():
     session = pd.Series({"year": 2026, "location": "São Paulo", "session_name": "Qualifying"})
     assert data.notes_path(session, ("RUS", "NOR")).name == "2026_sao_paulo_Q_NOR_RUS.md"
     assert data.notes_path(session, ("NOR", "RUS")) == data.notes_path(session, ("RUS", "NOR"))
+    # The race-pace page uses "pace" in place of a driver pair.
+    race = session.copy()
+    race["session_name"] = "Race"
+    assert data.notes_path(race, ("pace",)).name == "2026_sao_paulo_R_pace.md"
 
 
 def test_creating_notes_never_overwrites(tmp_path):
@@ -102,6 +114,84 @@ def test_reinstated_lap_counts_again():
     })
     assert data.deleted_laps(control.iloc[:1], laps, "HAM", pd.to_timedelta(2, unit="h")) == {7}  # before review
     assert data.deleted_laps(control, laps, "HAM", pd.to_timedelta(2, unit="h")) == set()          # after review
+
+
+def race_control(rows):
+    """Race-control messages from (UTC time, category, flag, scope, message) tuples."""
+    return pd.DataFrame(rows, columns=["date", "category", "flag", "scope", "message"])
+
+
+def test_neutralised_periods_from_real_messages():
+    # 2026 Mexico City race (real messages, plus one sector "clear" during the last safety car).
+    control = race_control([
+        ("2026-10-31T17:32:52+00:00", "SessionStatus", None, None, "SESSION STARTED"),  # stray, from the day before
+        ("2026-11-01T19:20:00+00:00", "Flag", "GREEN", "Track", "GREEN LIGHT - PIT EXIT OPEN"),
+        ("2026-11-01T20:12:05+00:00", "SafetyCar", None, None, "VSC DEPLOYED"),
+        ("2026-11-01T20:14:42+00:00", "SafetyCar", None, None, "VSC ENDING"),
+        ("2026-11-01T20:14:53+00:00", "Flag", "CLEAR", "Track", "TRACK CLEAR"),
+        ("2026-11-01T21:04:06+00:00", "SafetyCar", None, None, "SAFETY CAR DEPLOYED"),  # never "IN THIS LAP"...
+        ("2026-11-01T21:06:02+00:00", "SessionStatus", None, None, "SESSION ABORTED"),   # ...it became a red flag
+        ("2026-11-01T21:08:04+00:00", "Flag", "CLEAR", "Track", "TRACK CLEAR"),
+        ("2026-11-01T21:45:00+00:00", "SessionStatus", None, None, "SESSION STARTED"),
+        ("2026-11-01T22:05:02+00:00", "SafetyCar", None, None, "SAFETY CAR DEPLOYED"),
+        ("2026-11-01T22:08:00+00:00", "Flag", "CLEAR", "Sector", "CLEAR IN TRACK SECTOR 8"),  # one sector: no restart
+        ("2026-11-01T22:11:09+00:00", "SafetyCar", None, None, "SAFETY CAR IN THIS LAP"),     # still out until...
+        ("2026-11-01T22:11:50+00:00", "Flag", "CLEAR", "Track", "TRACK CLEAR"),               # ...the restart
+        ("2026-11-01T22:23:53+00:00", "Flag", "CHEQUERED", "Track", "CHEQUERED FLAG"),
+    ])
+    assert [(f"{a:%H:%M:%S}", f"{b:%H:%M:%S}") for a, b in data.neutralised_periods(control)] == [
+        ("20:12:05", "20:14:42"), ("21:04:06", "21:08:04"), ("22:05:02", "22:11:50")]
+
+    # 2026 Kuala Lumpur: a VSC that became a safety car is one period. And a safety car
+    # still out at the chequered flag ends there.
+    control = race_control([
+        ("2026-10-04T09:53:01+00:00", "SafetyCar", None, None, "VSC DEPLOYED"),
+        ("2026-10-04T09:58:26+00:00", "SafetyCar", None, None, "SAFETY CAR DEPLOYED"),
+        ("2026-10-04T10:11:34+00:00", "SafetyCar", None, None, "SAFETY CAR IN THIS LAP"),
+        ("2026-10-04T10:13:20+00:00", "Flag", "CLEAR", "Track", "TRACK CLEAR"),
+        ("2026-10-04T10:16:00+00:00", "SafetyCar", None, None, "SAFETY CAR DEPLOYED"),  # made up: out at the flag
+        ("2026-10-04T10:20:15+00:00", "Flag", "CHEQUERED", "Track", "CHEQUERED FLAG"),
+    ])
+    assert [(f"{a:%H:%M:%S}", f"{b:%H:%M:%S}") for a, b in data.neutralised_periods(control)] == [
+        ("09:53:01", "10:13:20"), ("10:16:00", "10:20:15")]
+
+
+def test_build_race_laps():
+    # Two drivers, four 100 s laps from 14:00:00; a VSC from 14:02:30 to 14:02:50, during lap 2.
+    def stamps(offset_s):
+        return [(pd.Timestamp("2026-11-08T14:00:00+00:00") + pd.to_timedelta(offset_s + 100 * i, unit="s")).isoformat()
+                for i in range(4)]
+
+    laps = pd.DataFrame({"driver_number": [4] * 4 + [81] * 4, "lap_number": [1, 2, 3, 4] * 2,
+                         "date_start": stamps(0) + stamps(1), "lap_duration": 100.0,
+                         "is_pit_out_lap": [False, False, False, True, False, False, True, None]})
+    drivers = pd.DataFrame({"driver_number": [4, 81], "name_acronym": ["NOR", "PIA"]})
+    stints = pd.DataFrame({"driver_number": [4, 81, 81], "lap_start": [1, 1, 3], "lap_end": [4, 2, None],
+                           "compound": ["MEDIUM", "MEDIUM", "HARD"], "tyre_age_at_start": [3, 0, 0]})
+    pits = pd.DataFrame({"driver_number": [81], "lap_number": [2]})  # NOR's stop is missing here
+    control = race_control([("2026-11-08T14:02:30+00:00", "SafetyCar", None, None, "VSC DEPLOYED"),
+                            ("2026-11-08T14:02:50+00:00", "SafetyCar", None, None, "VSC ENDING")])
+
+    table = data.build_race_laps(laps, drivers, stints, pits, control).set_index(["driver", "lap"])
+    nor, pia = table.loc["NOR"], table.loc["PIA"]
+    assert nor["tyre_age"].tolist() == [3, 4, 5, 6]                   # a used set: 3 laps old at the start
+    assert pia["compound"].tolist() == ["MEDIUM", "MEDIUM", "HARD", "HARD"]
+    assert pia["tyre_age"].tolist() == [0, 1, 0, 1]                   # the open stint runs to the last lap
+    assert pia["pit_in"].tolist() == [False, True, False, False]      # from the pit endpoint
+    assert nor["pit_in"].tolist() == [False, False, True, False]      # the lap before NOR's out-lap
+    assert pia["pit_out"].tolist() == [False, False, True, False]     # a missing value counts as False
+    assert nor["neutralised"].tolist() == pia["neutralised"].tolist() == [False, True, False, False]
+
+
+def test_build_results_statuses():
+    drivers = pd.DataFrame({"driver_number": [4, 18, 77, 44], "name_acronym": ["NOR", "STR", "BOT", "HAM"],
+                            "team_name": ["McLaren", "Aston Martin", "Cadillac", "Ferrari"],
+                            "team_colour": ["F47600", "229971", "AAAAAD", "ED1131"]})
+    results = pd.DataFrame({"driver_number": [4, 18, 77], "position": [1.0, None, None], "number_of_laps": [71, 30, 0],
+                            "dnf": [False, True, False], "dns": [False, False, True], "dsq": [False, False, False]})
+    table = data.build_results(results, drivers).set_index("driver")
+    assert table["status"].to_dict() == {"NOR": "Finished", "STR": "DNF", "BOT": "DNS", "HAM": "No result"}
+    assert table.loc["STR", "laps"] == 30
 
 
 def test_deleted_lap_just_before_local_midnight():
