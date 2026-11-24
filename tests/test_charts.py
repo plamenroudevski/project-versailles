@@ -67,3 +67,28 @@ def test_driver_names_link_to_their_laps():
                           "compound": ["SOFT", "SOFT"], "tyre_age": [1, 1]})
     ticks = charts.pace_distribution_figure(tower_table(), clean, driver_url=url).layout.xaxis.ticktext
     assert ticks[0] == '<a href="driver?race=11412&amp;driver=NOR" target="_blank">NOR</a>'
+
+
+def test_tyre_charts_show_every_team_and_grey_out_missing_data():
+    import tyres
+    from test_tyres import driver_race, fuel_setting  # made-up laps with a known answer (see test_tyres.py)
+
+    # McLaren has enough laps on softs; Ferrari only 10 (< 15): it must still appear, greyed.
+    laps = pd.concat([driver_race("NOR", "McLaren", [("SOFT", 20, 0, 0.05)]),
+                      driver_race("PIA", "McLaren", [("SOFT", 20, 0, 0.06)]),
+                      driver_race("LEC", "Ferrari", [("SOFT", 11, 0, 0.05)])], ignore_index=True)
+    laps["team_colour"] = laps["team"].map({"McLaren": "F47600", "Ferrari": "ED1131"})
+    run = tyres.analyse(laps, fuel_setting(0.05, 20))
+
+    teams = charts.tyre_teams_figure(run)
+    labels = teams.layout.yaxis.ticktext
+    assert "McLaren" in labels and any("Ferrari" in label and charts.MUTED in label for label in labels)
+    assert any("insufficient data (10 laps)" in str(trace.text) for trace in teams.data)
+
+    scatter = charts.tyre_scatter_figure(run)
+    key = [trace.name for trace in scatter.data if trace.showlegend is not False]
+    assert key == ["Ferrari", "McLaren"]  # one plain entry per team, alphabetical
+    assert {trace.line.dash for trace in scatter.data if trace.mode == "lines"} == {"solid"}  # all first stints
+
+    ranks = charts.tyre_sensitivity_figure(run)
+    assert [trace.y for trace in ranks.data] == [(1, 1, 1)]  # only McLaren has a number: rank 1 at every fuel value

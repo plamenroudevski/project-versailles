@@ -1,9 +1,9 @@
 """
-charts.py: Plotly figures for a two-driver comparison, and the race-pace
-classification and lap-time distribution.
+charts.py: Plotly figures for a two-driver comparison, the race-pace
+classification and lap-time distribution, and the tyre degradation charts.
 
-Pipeline position:  data.py -> analysis.py / pace.py -> charts.py -> app.py
-Draws analysis.compare()'s and pace.analyse()'s results and calculates
+Pipeline position:  data.py -> analysis.py / pace.py / tyres.py -> charts.py -> app.py
+Draws analysis.compare()'s, pace.analyse()'s and tyres.analyse()'s results and calculates
 nothing new. It has no Streamlit code, so the same figures work in the app
 and as standalone HTML:
 
@@ -22,6 +22,13 @@ writes two files into output/:
 writes two more:
     ..._Race_pace_classification.html  a TV-style timing tower ranked by median pace
     ..._Race_pace_distribution.html    every driver's clean laps as a box plot
+
+    python charts.py 2026 Brazil tyres                  # tyre degradation
+
+writes three more:
+    ..._Race_tyres_scatter.html      fuel-corrected lap time against tyre age, with each stint's line
+    ..._Race_tyres_teams.html        each team's degradation per compound, with intervals
+    ..._Race_tyres_sensitivity.html  the team ranking at the low, default and high fuel effect
 
 The look is a pit-wall screen, not a busy dashboard: dark, two high-contrast
 driver colours, large labels, almost no gridlines.
@@ -472,6 +479,218 @@ def pace_distribution_figure(table, clean, title="", driver_url=None):
     return fig
 
 
+# ---- Tyre degradation ------------------------------------------------------------
+# All three figures draw tyres.analyse()'s result (`run`) and calculate nothing new.
+
+STINT_DASHES = ("solid", "dash", "dot", "dashdot")
+# Each stint's fitted line gets a line style by stint number (first stint
+# solid, second dashed...), so stints aren't told apart by colour alone.
+
+DRIVER_SYMBOLS = ("circle", "diamond")
+# Teammates share a team colour, so the two drivers of a team (in alphabetical
+# order) get different marker shapes.
+
+
+def team_colours(laps):
+    """{team: '#RRGGBB'} from the lap table's team_colour column (MUTED if it's missing or malformed)."""
+    teams = laps.drop_duplicates("team")
+    colours = teams["team_colour"] if "team_colour" in teams else pd.Series(None, index=teams.index)
+    return {team: team_colour(colour) for team, colour in zip(teams["team"], colours)}
+
+
+def compound_order(compounds):
+    """Compounds present, softest first (not alphabetical)."""
+    present = set(compounds)
+    return [c for c in ("SOFT", "MEDIUM", "HARD") if c in present]
+
+
+def no_data_figure(text, title, height=300):
+    """An empty figure with a message, for a race with nothing to draw."""
+    fig = go.Figure()
+    fig.add_annotation(text=text, showarrow=False, font=dict(color=MUTED, size=FONT_SIZE))
+    style(fig, title, height)
+    fig.update_xaxes(visible=False)
+    fig.update_yaxes(visible=False)
+    return fig
+
+
+def tyre_scatter_figure(run, title=""):
+    """Chart 1: every counted lap's fuel-corrected time against its tyre age, one panel per compound.
+
+    One dot per lap in its team's colour (marker shape tells teammates apart),
+    and each stint's Theil-Sen line over the ages it ran, in the same colour,
+    its line style set by stint number. Clicking a team in the key hides or
+    shows its laps and lines. Hover gives driver, lap, tyre age and the
+    corrected time (with the real lap time beside it).
+    The panels share the time axis, so compounds can be compared by eye.
+    """
+    kept, stints = run["kept"], run["stints"]
+    compounds = compound_order(kept["compound"])
+    if not compounds:
+        return no_data_figure("No laps left to fit in this race.", title)
+    colours = team_colours(run["laps"])
+    symbol = {driver: DRIVER_SYMBOLS[i % len(DRIVER_SYMBOLS)]
+              for _, team in kept.groupby("team") for i, driver in enumerate(sorted(team["driver"].unique()))}
+    fits = stints.set_index(["driver", "stint"])
+
+    fig = make_subplots(rows=1, cols=len(compounds), shared_yaxes=True, horizontal_spacing=0.04,
+                        subplot_titles=[COMPOUNDS[c][0] for c in compounds])
+    # The key: one plain circle per team, alphabetical, with no data. It's in the same legend
+    # group as the team's dots and lines, so clicking it hides or shows them all.
+    for team in sorted(kept["team"].unique()):
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers", name=team, legendgroup=team, hoverinfo="skip",
+                                 marker=dict(color=colours.get(team, MUTED), size=11)), row=1, col=1)
+    for col, compound in enumerate(compounds, start=1):
+        for (team, driver, stint), laps in kept[kept["compound"] == compound].groupby(["team", "driver", "stint"]):
+            colour = colours.get(team, MUTED)
+            details = np.column_stack([laps["driver"], laps["lap"], laps["lap_time_s"].map(analysis.lap_time_text),
+                                       laps["corrected_s"].map(analysis.lap_time_text)])
+            fig.add_trace(go.Scatter(
+                x=laps["tyre_age"], y=laps["corrected_s"], mode="markers", name=team, legendgroup=team,
+                showlegend=False, customdata=details,
+                marker=dict(color=colour, symbol=symbol[driver], size=7, line=dict(color=BACKGROUND, width=0.6)),
+                hovertemplate="<b>%{customdata[0]}</b> · lap %{customdata[1]} · tyre age %{x}<br>"
+                              "corrected %{customdata[3]} (actual %{customdata[2]})<extra></extra>"), row=1, col=col)
+            fit = fits.loc[(driver, stint)]
+            ages = np.array([laps["tyre_age"].min(), laps["tyre_age"].max()], dtype=float)
+            fig.add_trace(go.Scatter(
+                x=ages, y=fit["intercept"] + fit["slope"] * ages, mode="lines", legendgroup=team, showlegend=False,
+                line=dict(color=colour, width=2, dash=STINT_DASHES[(int(stint) - 1) % len(STINT_DASHES)]),
+                hovertemplate=f"<b>{html.escape(driver)}</b> stint {int(stint)}: {fit['slope']:+.3f} s per lap of age"
+                              "<extra></extra>"), row=1, col=col)
+
+    style(fig, title, height=680)
+    # The key goes under the chart: with 11 teams it wraps, and on top it would cover the panel titles.
+    fig.update_layout(hovermode="closest", margin=dict(b=150),
+                      legend=dict(title=dict(text="Team "), x=0, xanchor="left", y=-0.16, yanchor="top"))
+    ticks, labels = lap_time_ticks(kept["corrected_s"].min(), kept["corrected_s"].max())
+    fig.update_yaxes(tickvals=ticks, ticktext=labels)
+    fig.update_yaxes(title=dict(text="Lap time, corrected to full fuel", font=dict(size=FONT_SIZE)), row=1, col=1)
+    fig.update_xaxes(title=dict(text="Tyre age (laps)", font=dict(size=FONT_SIZE)))
+    return fig
+
+
+def tyre_teams_figure(run, title=""):
+    """Chart 2: each team's degradation (s per lap of tyre age) with its 90 % interval, one panel per compound.
+
+    Teams are sorted within each compound, lowest degradation at the top. A
+    filled marker means the interval excludes zero; a hollow one means "not
+    distinguishable from flat" (shape, not just colour, carries it). Teams
+    without enough laps are listed in grey with "insufficient data", not
+    hidden. Where Method B could be fitted, its whole-field interval is a
+    faint band: a check that needs no fuel figure.
+    """
+    teams = run["teams"]
+    if teams is None or teams.empty:
+        return no_data_figure("No laps left to fit in this race.", title)
+    compounds = compound_order(teams["compound"])
+    colours = team_colours(run["laps"])
+    method_b = run["method_b"].set_index("compound") if run.get("method_b") is not None else pd.DataFrame()
+    sizes = [int((teams["compound"] == c).sum()) for c in compounds]
+    fig = make_subplots(rows=len(compounds), cols=1, shared_xaxes=True, row_heights=sizes, vertical_spacing=0.08,
+                        subplot_titles=[COMPOUNDS[c][0] for c in compounds])
+
+    for row, compound in enumerate(compounds, start=1):
+        rows = teams[teams["compound"] == compound]  # tyres.team_slopes sorts lowest first, no-data teams last
+        for team in rows[rows["status"] == "OK"].itertuples():
+            colour = colours.get(team.team, MUTED)
+            fig.add_trace(go.Scatter(
+                x=[team.slope], y=[team.team], mode="markers", showlegend=False,
+                error_x=dict(type="data", symmetric=False, array=[team.high - team.slope],
+                             arrayminus=[team.slope - team.low], color=colour, thickness=2, width=6),
+                marker=dict(color=BACKGROUND if team.flat else colour, size=12, line=dict(color=colour, width=2),
+                            symbol="circle"),
+                hovertemplate=f"<b>{html.escape(team.team)}</b> · {COMPOUNDS[compound][0]}<br>"
+                              f"{team.slope:+.3f} s/lap [{team.low:+.3f}, {team.high:+.3f}]<br>"
+                              f"≈ {team.loss_10:+.2f} s over 10 laps · {int(team.laps)} laps, {team.stints} stints"
+                              + ("<br>not distinguishable from flat" if team.flat else "") + "<extra></extra>"),
+                row=row, col=1)
+        missing = rows[rows["status"] != "OK"]
+        if len(missing):
+            fig.add_trace(go.Scatter(
+                x=[0] * len(missing), y=missing["team"], mode="text", showlegend=False, hoverinfo="skip",
+                text=[f"  insufficient data ({int(n)} laps)" for n in missing["laps"]], textposition="middle right",
+                textfont=dict(color=MUTED, size=FONT_SIZE - 2), cliponaxis=False), row=row, col=1)  # cliponaxis: not cut at the plot edge
+        # Lowest at the top: Plotly draws the first category at the bottom, so reverse the order.
+        # Teams without a number get a grey label (Plotly reads a <span style> in tick text).
+        order = rows["team"].tolist()[::-1]
+        labels = [name if name in set(rows.loc[rows["status"] == "OK", "team"])
+                  else f'<span style="color:{MUTED}">{html.escape(name)}</span>' for name in order]
+        fig.update_yaxes(categoryorder="array", categoryarray=order, tickvals=order, ticktext=labels, showgrid=False,
+                         row=row, col=1)
+        fig.add_vline(x=0, line=dict(color=MUTED, width=1), row=row, col=1)
+        if compound in method_b.index and method_b.loc[compound, "status"] == "OK":
+            b = method_b.loc[compound]
+            fig.add_vrect(x0=b["low"], x1=b["high"], fillcolor=see_through(TEXT, 0.08), line_width=0, layer="below",
+                          row=row, col=1)
+            fig.add_annotation(x=b["slope"], y=1, yref=f"y{row if row > 1 else ''} domain", yanchor="bottom",
+                               text="Method B, whole field", showarrow=False,
+                               font=dict(color=MUTED, size=FONT_SIZE - 4))
+
+    style(fig, title, height=140 + 34 * sum(sizes) + 60 * len(compounds))
+    fig.update_layout(hovermode="closest", margin=dict(l=150))
+    fig.update_xaxes(zeroline=False, title=dict(text="s lost per lap of tyre age", font=dict(size=FONT_SIZE)),
+                     row=len(compounds), col=1)
+    return fig
+
+
+def tyre_sensitivity_figure(run, title=""):
+    """Chart 3 (small): each team's rank (1 = lowest degradation) at the low, default and high fuel effect.
+
+    Flat lines mean the ranking doesn't depend on the fuel assumption. Hover
+    gives the slope at each value. One panel per compound, stacked (side by
+    side, the team names had no room in the app's column); only teams with a
+    number on that compound.
+    """
+    table = run["sensitivity"]
+    if table is None or table.empty:
+        return no_data_figure("No team has enough laps for a ranking.", title, height=240)
+    names = [n for n in ("low", "default", "high") if f"rank_{n}" in table]
+    steps = [f"{n.capitalize()} · {run['fuel'][n]:.3f} s/lap" for n in names]
+    compounds = compound_order(table["compound"])
+    colours = team_colours(run["laps"])
+    sizes = [int((table["compound"] == c).sum()) for c in compounds]
+    # shared_xaxes: the fuel steps are the same in every panel, so they're labelled once, at the bottom.
+    fig = make_subplots(rows=len(compounds), cols=1, row_heights=sizes, vertical_spacing=0.12, shared_xaxes=True,
+                        subplot_titles=[COMPOUNDS[c][0] for c in compounds])
+    for row, compound in enumerate(compounds, start=1):
+        for team in table[table["compound"] == compound].to_dict("records"):
+            colour = colours.get(team["team"], MUTED)
+            fig.add_trace(go.Scatter(
+                x=steps, y=[team[f"rank_{n}"] for n in names], mode="lines+markers+text", showlegend=False,
+                line=dict(color=colour, width=2), marker=dict(color=colour, size=8),
+                text=[""] * (len(names) - 1) + [f" {team['team']}"], textposition="middle right",
+                textfont=dict(color=colour, size=FONT_SIZE - 3),
+                customdata=[team[f"slope_{n}"] for n in names],
+                hovertemplate=f"<b>{html.escape(team['team'])}</b> · %{{x}}<br>rank %{{y}} · %{{customdata:+.3f}} s/lap"
+                              "<extra></extra>"), row=row, col=1)
+    style(fig, title, height=120 + 34 * sum(sizes) + 90 * len(compounds))
+    fig.update_layout(hovermode="closest", margin=dict(l=60))
+    fig.update_xaxes(range=[-0.2, len(names)])  # a spare step on the right for the team names
+    # Ranks run 1 (top) downwards; a little padding so the first and last lines don't touch the edges.
+    for row, size in enumerate(sizes, start=1):
+        fig.update_yaxes(range=[size + 0.5, 0.5], dtick=1, showgrid=False, row=row, col=1)
+    return fig
+
+
+def tyres_main(year, place):
+    import data
+    import tyres
+
+    session = data.find_session(year, place, "Race")
+    run = tyres.analyse(data.tyre_lap_table(session))
+    title = f"{session['year']} {session['location']} race · tyre degradation"
+
+    os.makedirs("output", exist_ok=True)
+    stem = os.path.join("output", f"{year}_{place}_Race_tyres".replace(" ", "_"))
+    figures = {"scatter": tyre_scatter_figure(run, f"{title} · fuel-corrected laps"),
+               "teams": tyre_teams_figure(run, f"{title} · by team"),
+               "sensitivity": tyre_sensitivity_figure(run, f"{title} · ranking vs fuel assumption")}
+    for suffix, fig in figures.items():
+        fig.write_html(f"{stem}_{suffix}.html", include_plotlyjs="cdn", config={"displaylogo": False})
+        print(f"Saved {stem}_{suffix}.html")
+
+
 def main(year, place, session_name, name_a, name_b):
     import fastf1
 
@@ -520,6 +739,8 @@ if __name__ == "__main__":
     try:
         if len(args) == 2:  # year and place only: race pace
             race_pace_main(int(args[0]), args[1])
+        elif len(args) == 3 and args[2].lower() == "tyres":  # year, place, "tyres": tyre degradation
+            tyres_main(int(args[0]), args[1])
         else:
             main(int(args[0]), args[1], args[2], args[3], args[4])
     except LookupError as error:
