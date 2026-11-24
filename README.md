@@ -1,6 +1,6 @@
-# Project Versailles: F1 qualifying telemetry and race pace analyser
+# Project Versailles: F1 qualifying telemetry, race pace and tyre degradation analyser
 
-Compares two drivers' qualifying laps from real F1 telemetry and shows **where** one gains or loses time and the **likely reason**, corner by corner. A second page, **Race pace**, ranks every driver in a race by their median lap time over clean racing laps: who was actually fastest, as opposed to who finished where ([method below](#race-pace-method)).
+Compares two drivers' qualifying laps from real F1 telemetry and shows **where** one gains or loses time and the **likely reason**, corner by corner. A second page, **Race pace**, ranks every driver in a race by their median lap time over clean racing laps: who was actually fastest, as opposed to who finished where ([method below](#race-pace-method)). A third, **Tyre degradation**, estimates how much lap time each car lost per lap of tyre age, per compound ([method below](#tyre-degradation-method)).
 
 **Live app: https://project-versailles.streamlit.app/** (any session from 2023 onwards; the app sleeps when unused, so the first visit can take a minute)
 
@@ -70,6 +70,34 @@ Two views: a TV-style timing tower (hover a row for clean laps and tyre strategy
 - **Pace rank ignores strategy, traffic, damage and tyre age,** so the summary is worded as pointers, not verdicts.
 - Race sessions only: no sprints or practice long runs yet.
 
+## Tyre degradation method
+
+The **Tyre degradation** page estimates how much lap time each car lost per lap of tyre age, per compound, with a 90 % interval on every number. How a car treats its tyres is a car trait (aero balance, suspension, setup window), but a lap time also carries the driver's tyre management and the race around them, so the page presents it as an **indicator, never a verdict**.
+
+![Tyre degradation page, 2026 Las Vegas Grand Prix](docs/tyres.png)
+
+1. **Data.** The same OpenF1 downloads as race pace, once each for the whole field: `laps`, `stints`, `pit`, `race_control`, `drivers`. Stints are rebuilt from pit out-laps, because OpenF1's stint table was wrong for two drivers in the test races (Stroll in São Paulo, Lawson in Las Vegas); compounds and starting tyre ages come from OpenF1 in the same order, and those drivers are flagged "rebuilt from pit stops". **Gap to the car ahead** comes from the lap table itself: cars that finished the same lap, sorted by when they crossed the line. It matches OpenF1's `intervals` to a median of 0.06 s, has no missing laps, and saves a ~25,000-row download.
+2. **Laps that count.** Not lap 1, pit in- or out-laps, safety car, VSC or red-flag laps, laps without a time, intermediate or wet tyres, or **laps within 1.5 s of the car ahead** (dirty air). A stint needs **8** counted laps.
+3. **Tyre age** = the set's age at the start of the stint + laps since. Used sets start above zero.
+4. **Fuel correction (Method A).** Cars get faster as fuel burns off, which hides degradation. Each lap gets back what the burnt fuel gave it: **0.035 s per kg per lap** (Mercedes: 0.3–0.4 s per 10 kg; Motorsport Magazine: ~0.35 s per 10 kg) × **70 kg** of race fuel (2026 rules) ÷ race laps. That's 0.035 s/lap over 71 laps (São Paulo) and 0.049 over 50 (Las Vegas). **This is an assumption, not a measurement**, so the team ranking is also shown at 0.030 and 0.040 s/kg. Within a stint the correction adds exactly the fuel figure to every slope, so it can't reorder stints, only shift them all.
+5. **Slope per stint: Theil–Sen** (the median of the slopes between every pair of laps) in numpy. A lock-up or a backmarker lap 4 s slow barely moves it, where ordinary least squares would be pulled off (the tests show 0.09 s/lap of error from three such laps). **90 % interval** by bootstrap with a fixed seed. An interval that includes zero is "not distinguishable from flat"; negative slopes are kept and flagged, never clamped to zero.
+6. **Team × compound.** Both drivers' laps pooled, each stint centred on its own median time **and median tyre age**, so a slower driver or an older set can't create a slope. Under **15** laps: "insufficient data", shown greyed, not hidden. Teammates are compared on the same compound: the fairest test, because the car is the same.
+7. **Cross-check (Method B), with no fuel figure:** `lap time = pace[driver, compound] + lap effect[lap] + slope × tyre age`, fitted by least squares. The lap effects absorb fuel and track changes for the whole field. It only gives a number when enough drivers ran two stints on one compound; otherwise it says so.
+
+**What the test races show.** São Paulo (wet, then drying) gives negative slopes for 10 of 11 teams on softs: the track gained grip faster than the tyres wore. Method B finds the whole field got 0.121 s faster per lap, against 0.035 for fuel, and puts softs at **+0.042 s/lap**. That disagreement is the finding: Method A read the drying track as tyres getting faster. Las Vegas ran in packs (532 of 989 laps within 1.5 s of the car ahead), so only 7 of 22 team × compound cells have enough laps, and Method B can't check it. On dry races with two-stop strategies (2026 Austin, Singapore, Zandvoort) the two methods agree on every compound, and Method B's field trend is close to the assumed fuel effect.
+
+![São Paulo: every team's soft-tyre slope sits left of Method B's whole-field band](docs/tyres_sao_paulo_teams.png)
+
+`python tyres.py 2026 Brazil` prints every table; `python charts.py 2026 Brazil tyres` saves the three charts in `output/`. Every number lives in the `CONFIG` block of [`tyres.py`](tyres.py).
+
+**Limits of the tyre degradation method**
+- **Fuel figure.** Borrowed from team and press sources that predate the 2026 cars, and it varies by track. Teams that start short of fuel burn less per lap than 70 kg ÷ race laps.
+- **Track evolution.** Method A ignores it. A rubbering-in or drying track makes tyres look better than they are; Method B corrects for it only where it can be fitted.
+- **Traffic.** Only the gap to the car ahead *in race order* is known, so a car held up by a backmarker counts as clean air. The 1.5 s rule also removes most laps in races run in packs.
+- **Straight lines only.** No "cliff" detection: a tyre that falls away at the end of a stint is averaged into one slope.
+- **Car or driver?** A steeper slope can be the car, a driver managing a gap, or a stint spent fighting. Teammate comparisons help, but can't separate them.
+- Wet tyres are never fitted; race sessions only.
+
 ## Limitations
 
 - **One lap proves nothing on its own.** Findings describe *this* lap; traffic, tyre preparation or a mistake can dominate.
@@ -93,19 +121,20 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Terminal tools: `python analysis.py` (zone table and findings), `python charts.py` (HTML charts in `output/`), `python check_session.py` (which channels a session provides). Each takes `YEAR PLACE SESSION A B`, e.g. `2026 Brazil Qualifying NOR RUS`. For race pace, give just `YEAR PLACE`: `python pace.py 2026 Brazil` (ranking and summary), `python charts.py 2026 Brazil` (timing tower and box plot in `output/`).
+Terminal tools: `python analysis.py` (zone table and findings), `python charts.py` (HTML charts in `output/`), `python check_session.py` (which channels a session provides). Each takes `YEAR PLACE SESSION A B`, e.g. `2026 Brazil Qualifying NOR RUS`. For race pace, give just `YEAR PLACE`: `python pace.py 2026 Brazil` (ranking and summary), `python charts.py 2026 Brazil` (timing tower and box plot in `output/`). For tyre degradation: `python tyres.py 2026 Brazil` (every table) and `python charts.py 2026 Brazil tyres` (three charts in `output/`).
 
-**Your own notes:** add Markdown files in `notes/` (the app creates an empty one with one click when run locally). They show under the findings, and online once committed. Race pace notes use `pace` in place of the driver pair, e.g. `notes/2026_sao_paulo_R_pace.md`.
+**Your own notes:** add Markdown files in `notes/` (the app creates an empty one with one click when run locally). They show under the findings, and online once committed. Race pace notes use `pace` in place of the driver pair, e.g. `notes/2026_sao_paulo_R_pace.md`, and tyre notes use `tyres`: `notes/2026_sao_paulo_R_tyres.md`.
 
 ## Project layout
 
 | File | Role |
 |---|---|
-| [`data.py`](data.py) | Fetching and caching (OpenF1, MultiViewer), deleted laps, race lap tables, notes files |
+| [`data.py`](data.py) | Fetching and caching (OpenF1, MultiViewer), deleted laps, race and tyre lap tables, notes files |
 | [`analysis.py`](analysis.py) | The qualifying analysis engine: pure functions, runnable from a script |
 | [`pace.py`](pace.py) | The race pace engine: pure functions on a plain lap table, runnable from a script |
-| [`charts.py`](charts.py) | Plotly figures and the race pace timing tower (HTML) |
-| [`app.py`](app.py) | Streamlit user interface only: the Qualifying and Race pace pages |
+| [`tyres.py`](tyres.py) | The tyre degradation model: pure functions on a plain lap table, runnable from a script |
+| [`charts.py`](charts.py) | Plotly figures, the race pace timing tower (HTML) and the tyre charts |
+| [`app.py`](app.py) | Streamlit user interface only: the Qualifying, Race pace and Tyre degradation pages |
 | [`check_session.py`](check_session.py) | Reports which telemetry channels a session actually has |
 | [`tests/`](tests) | pytest, using made-up laps with hand-checked answers |
 
@@ -114,7 +143,7 @@ Run the tests with `python -m pytest`.
 ## Next (out of scope for v1)
 
 - Live timing
-- Tyre degradation and fuel correction; sprint and practice long-run pace
+- Tyre "cliff" detection; sprint and practice long-run pace and degradation
 - Comparing more than two drivers
 - User accounts
 - Databases

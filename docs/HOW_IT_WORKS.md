@@ -1,6 +1,6 @@
 # How it works
 
-Your revision guide: the whole pipeline from raw data to findings, the reasoning behind each choice, and the questions you're likely to be asked. Numbers come from the acceptance test: **Norris vs Russell, 2026 São Paulo qualifying** (wet). The race pace page has its own section, [9. Race pace method](#9-race-pace-method-pacepy), tested on the **2026 São Paulo race**.
+Your revision guide: the whole pipeline from raw data to findings, the reasoning behind each choice, and the questions you're likely to be asked. Numbers come from the acceptance test: **Norris vs Russell, 2026 São Paulo qualifying** (wet). The race pace page has its own section, [9. Race pace method](#9-race-pace-method-pacepy), tested on the **2026 São Paulo race**. Tyre degradation is [10. Tyre degradation method](#10-tyre-degradation-method-tyrespy), tested on the **2026 São Paulo and Las Vegas races**.
 
 ## The 30-second version
 
@@ -16,13 +16,14 @@ OpenF1 (laps, telemetry, position, weather, race control,    MultiViewer via Fas
                              |
           analysis.py  align -> corners -> zones -> metrics -> findings -> car/driver read   (qualifying)
           pace.py      racing laps -> 2-sigma filter -> median, rank, gap -> summary           (race pace)
+          tyres.py     counted laps -> tyre age -> fuel correction -> Theil-Sen per stint/team -> Method B check
                              |
-                          charts.py    Plotly figures, the race pace timing tower
+                          charts.py    Plotly figures, the race pace timing tower, the tyre charts
                              |
-                          app.py       Streamlit pages (UI only): Qualifying, Race pace
+                          app.py       Streamlit pages (UI only): Qualifying, Race pace, Tyre degradation
 ```
 
-Each file only talks to the one before it. `analysis.py` and `pace.py` have no downloads and no Streamlit, which is what makes them testable with made-up laps.
+Each file only talks to the one before it. `analysis.py`, `pace.py` and `tyres.py` have no downloads and no Streamlit, which is what makes them testable with made-up laps.
 
 ## 1. Getting the data (`data.py`)
 
@@ -208,6 +209,129 @@ Keep each driver's laps within 2 standard deviations of *their own* mean.
 - **How do you know the safety-car mapping works?** Ran it on all 91 races since 2023 and listed every period over 15 minutes without a red flag, or never closed: all were genuine long safety cars, plus 2023 Melbourne's finish under the safety car.
 - **What would you add with more data?** A tyre-degradation slope per stint, a fuel-effect model to compare retirements fairly, a rule to rank wet races on one tyre type, and practice long runs.
 
+## 10. Tyre degradation method (`tyres.py`)
+
+![Tyre degradation page, 2026 Las Vegas Grand Prix](tyres.png)
+
+### The 30-second version
+
+> "For each stint, it keeps the laps a car ran in clean air, adds back the time the burnt fuel gave it, and fits a robust straight line of lap time against tyre age: the slope is the degradation in seconds per lap. It pools both drivers per team and compound, with a bootstrap interval on every number. Because the fuel figure is an assumption, it shows the ranking at a low and a high value, and it cross-checks with a second model that needs no fuel figure at all. In São Paulo the two disagreed: the drying track made tyres look like they improved, and the second model caught it."
+
+### The lap table
+
+`data.build_tyre_laps` extends race pace's lap table (unchanged, so race pace's results don't move) with `team`, `team_colour`, `stint`, `tyre_age_at_start`, `gap_ahead_s` and `reconstructed`. `tyres.py` reads only plain columns, so AiM or MoTeC laps would work too.
+
+- **Stints are rebuilt from pit out-laps.** OpenF1's stint table put Stroll's second stint (São Paulo) on lap 10 though he pitted on lap 16, and Lawson's (Las Vegas) on lap 2 though he pitted on lap 17. A stint now starts on a driver's first lap and every out-lap (`cumsum` over those flags gives 1, 2, 3...). Compounds and starting tyre ages come from OpenF1's stints *in the same order*. If the two disagree on how many stints a driver had, the order can't be trusted: the compound stays empty and the driver's laps drop out as "no tyre data", never guessed.
+- **Gap to the car ahead from line crossings** (`data.line_gaps`). Every lap ends as the car crosses the line. Cars that finished the same lap number, sorted by that moment, are in race order, and the time since the previous car crossed is the gap. Checked against OpenF1's `intervals`: median difference 0.06 s, the same side of 1.5 s for 96–97 % of laps, and no missing laps (`intervals` lacked ~2 %), with no extra ~25,000-row download. The leader's gap is infinite.
+
+### Step 1: which laps count (`why_dropped`)
+
+Each lap gets the first reason that fits, in order: lap 1, no time, pit in-lap, pit out-lap, safety car / VSC / red flag, no tyre data, intermediates or wets, **traffic** (within `TRAFFIC_GAP_S` = 1.5 s of the car ahead), then **short stint** (fewer than `MIN_STINT_LAPS` = 8 counted laps left).
+
+| Assumption | What it does to the result |
+|---|---|
+| 1.5 s is "in traffic" | Lower keeps more laps but lets dirty air in (slower laps, usually flatter slopes, as the car ahead sets the pace). Las Vegas: 1.0 s keeps 21 stints, 1.5 s 16, 2.0 s 13. |
+| Gap measured at the line only | A car can be close mid-lap and clear at the line, or the other way round. |
+| Race order, not track order | A car held up by a backmarker it's lapping counts as clean air. |
+| Wet tyres never fitted | Their "degradation" is mostly the weather. A dry race has none anyway. |
+| 8-lap minimum per stint | A line through 4–5 points is set by one lap either way. |
+
+São Paulo: 641 of 1,437 laps kept (459 on inters, 182 in traffic). Las Vegas: 234 of 989 (532 in traffic: the race ran in packs).
+
+### Step 2: tyre age (`add_tyre_age`)
+
+`tyre age = tyre_age_at_start + (lap − the stint's first lap)`. It must run on every lap *before* step 1, because a stint's first lap is its out-lap, which step 1 drops. Used sets matter: five drivers started Las Vegas on softs 2–4 laps old.
+
+### Step 3: fuel correction, Method A (`fuel_corrected`)
+
+`corrected = lap time + fuel effect × (laps completed before this one)`: every lap moved to a full-tank fuel load.
+
+- **Fuel effect per lap = s per kg × race fuel ÷ race laps.** 0.035 s/kg (Motorsport Magazine: ~0.35 s per 10 kg; Mercedes: 0.3–0.4 s per 10 kg, the low and high values) × 70 kg (2026's reported race fuel allowance, from the 3000 MJ/h energy-flow limit) ÷ the winner's laps. That's 0.035 s/lap over 71 laps (São Paulo) and 0.049 over 50 (Las Vegas). I made it per race rather than one s/lap constant, because a shorter race burns more fuel per lap.
+- **It's an assumption, not a measurement.** Within one stint, fuel load and tyre age change together, one step per lap, so lap times alone can't separate them. The figure has to come from outside, and the page says so.
+- **The key property:** within a stint, laps completed = tyre age + a constant. So the correction adds **exactly** the fuel figure to every stint's slope (tested). It can't reorder stints, only shift them all, and decide whether a slope reads as negative, flat or positive. For team slopes (stints pooled) it's very nearly exact. Both test races: the team ranking is identical at 0.030, 0.035 and 0.040 s/kg.
+- **Effect of getting it wrong:** too low a fuel figure makes every slope too low (fuel's gain is read as tyres improving); too high makes every slope too high. Teams that start short of fuel and save it burn less than 70 kg ÷ laps per lap, so the default may overstate the fuel effect slightly.
+
+### Step 4: a robust slope per stint (`theil_sen`, `bootstrap_interval`)
+
+- **Theil–Sen:** the median of the slopes between every pair of laps (`np.triu_indices` lists each pair once). Ordinary least squares minimises *squared* errors, so a lap 3 s slow counts as much as nine laps 1 s off. In the test, three laps 4 s slow add 4 × (8 + 10 + 12) / 1300 = **0.092 s/lap** to the least-squares slope (nearly tripling it), while Theil–Sen stays within 0.015 of the truth. It tolerates up to ~29 % bad points.
+- **90 % interval by bootstrap:** resample the stint's laps with replacement 1,000 times, refit, take the 5th and 95th percentiles. No formula needed, which matters because Theil–Sen has no simple one. Fixed seed (`SEED = 0`), so the page doesn't change on reload. Done 100 resamples at a time with numpy arrays. Above 20,000 lap pairs (the whole field pooled: ~200,000), each resample uses a random 20,000. That moved the São Paulo interval by under 0.001 s/lap and cut the analysis from 11 s to 2.7 s.
+- **Flags:** "not distinguishable from flat" if the interval includes zero; negative slopes are kept and flagged, never clamped to zero. They usually mean track evolution or fuel error is bigger than the degradation signal, and hiding them would hide that.
+- Also shown as the total over 10 and 20 laps of tyre age, which is easier to picture.
+
+### Step 5: team and compound, like for like (`pooled_slopes`, `demeaned`)
+
+- **Same compound only**, both drivers' laps pooled, one Theil–Sen slope with its interval. Under `MIN_POOLED_LAPS` = 15: "insufficient data", shown greyed, not hidden.
+- **Each stint is centred on its own median time**, so a slower driver can't create a slope. Example: if the slower teammate also ran older tyres, raw pooling would tilt the line up with no degradation at all. The test: four stints at 0.05 s/lap, each 1.5 s slower and on older tyres than the last. Raw pooling gives over 0.10.
+- **And on its own median tyre age.** This goes beyond the brief, and it's needed. Theil–Sen also pairs laps from *different* stints. With only the times centred, two stints degrading at +0.05 s/lap on ages 1–19 and 11–29 give a "slope" of −0.45 s/lap between age 15 in one and age 16 in the other. With three or more stints, those cross-stint pairs outnumber the within-stint ones and drag the slope towards zero (under 0.03 in the test, against a true 0.05). Centring both puts every stint on one line through (0, 0). This is the standard "within" (fixed-effects) estimate.
+- **Teammates** (`teammate_gaps`): the same pooling per driver and compound. "Separated" means the two intervals don't overlap. The summary card leads with the largest *separated* difference, because the largest raw one is often a short, noisy stint (São Paulo: Stroll's single 8-lap stint, interval −1.1 to +0.8).
+
+### Step 6: Method B, a cross-check with no fuel figure (`method_b`)
+
+`lap time = pace[driver, compound] + lap effect[lap] + compound slope × tyre age`, one least-squares fit (`np.linalg.lstsq`) with a 0/1 column per driver-and-compound, a 0/1 column per lap number (`pd.get_dummies`), and a tyre-age column per compound. The lap effects absorb whatever changed for the whole field on each lap: fuel burnt, track grip, wind, temperature.
+
+- **Why not one pace per stint, as first planned.** Tyre age = lap number − the lap the stint started. With a free effect per lap and per stint, tyre age is *exactly* a combination of the other columns, so every slope fits equally well. This is the **age-period-cohort problem** (age = period − cohort), and staggered pit stops don't break it. The leftover tyre-age variation was exactly 0.0 in both test races.
+- **What breaks the tie:** a pit stop onto a fresh set of the *same* compound. Tyre age resets to zero while the driver, car and compound stay the same, so the jump in pace at that stop (against what the rest of the field did on those laps) separates tyres from fuel and track. Added assumption: a driver's pace on a compound is the same in each stint on it, apart from tyre age and the field's lap-by-lap change.
+- **Identifiability check** (`age_shares`): the share of a compound's tyre-age variation (within stints) that the pace and lap columns can't explain. Below `MIN_AGE_SHARE` = 0.10 (the textbook "variance inflation factor above 10" rule), it says "not identifiable" instead of giving a number. One-stop races, or races where every driver pits on the same lap, always fail. The test: everyone pitting on lap 20 gives a share of exactly 0.
+- **Interval:** a bootstrap over **drivers** (200 resamples), not laps. A driver's laps aren't independent, and the slope comes from each driver's own stints.
+- **Field trend:** a Theil–Sen line through the lap effects: how much faster the whole field got per lap, fuel and track together. Compare it with Method A's fuel figure.
+- **Its weaknesses:** it assumes every car gains the same each lap; it's plain least squares, so odd laps pull on it more than on Theil–Sen; and it needs same-compound second stints.
+
+**A against B, on real races** (whole field per compound):
+
+| Race | Result | What it says |
+|---|---|---|
+| Austin, Singapore, Zandvoort | Agree on every compound | B's field trend (0.060 / 0.041 / 0.038 s/lap) is close to A's assumed fuel effect (0.044 / 0.040 / 0.034): independent support for the fuel figure |
+| São Paulo | **Disagree**: A −0.047, B **+0.042** s/lap on softs | The field gained 0.121 s/lap, but fuel explains 0.035. The rest is the drying track, which A reads as tyres getting faster. B's number is the believable one |
+| Mexico City | "Agree" only because B's interval is wide | B's field trend is just 0.008 s/lap; probably the red flag (cooler track, everyone on fresh tyres at the restart). Unconfirmed |
+| Las Vegas, Baku, Monza | B refuses | Almost nobody ran two stints on one compound |
+
+**Disagreement is a finding, not an error.** The usual causes: a wrong fuel figure (A only), track evolution (A reads it as tyres, B removes it), unequal gains between cars (B's assumption), or odd laps (B is least squares). The test: a made-up track gaining 3 s over a race fools A below 0.03 s/lap, while B recovers the true 0.05.
+
+### Charts and the page
+
+- **Order: answer first.** Summary cards come first: lowest and highest team per compound with intervals (and "could be chance" when they overlap), the largest teammate difference, Method B's verdict, and laps used. Then "How these numbers are made" in normal-size text (filters, fuel figure and sources, traffic rule, the caveat), your notes (`notes/<year>_<city>_R_tyres.md`), then the charts and a tables expander.
+- **Team chart:** a dot with a 90 % error bar per team, lowest at the top. A hollow dot means the interval spans zero (shape, not just colour). Teams without enough laps are greyed with "insufficient data (9 laps)". Where Method B could be fitted, its whole-field interval is a faint band. In São Paulo every team sits left of it, which shows the problem at a glance.
+
+![São Paulo: every team's soft-tyre slope sits left of Method B's whole-field band](tyres_sao_paulo_teams.png)
+
+- **Every counted lap:** one panel per compound, a dot per lap in team colour. Teammates get different marker shapes and each stint's line gets a line style by stint number, so nothing relies on colour alone (four teams are shades of blue). Click a team in the key to filter.
+- **Sensitivity:** each team's rank at the low, default and high fuel value. Flat lines mean the fuel assumption doesn't change the order.
+- **Cached per race** (`tyre_model`): 4.4 s for a race's first visit locally, 1.4 s after. It reuses race pace's five downloads, so there's no extra load on OpenF1's limit.
+
+### Tests
+
+| Test | What it proves |
+|---|---|
+| Four drivers, two 20-lap stints, known slopes 0.06 and 0.03, 0.1 s noise | Stint slopes recovered within 0.02 s/lap, team slopes within 0.01 |
+| 25 laps at 0.05 s/lap plus three laps 4 s slow | Theil–Sen stays within 0.015; least squares is pulled 0.05+ off |
+| Lap 1, pit laps, safety car, no time, two laps 1.0 s behind, one 1.6 s behind, a 6-lap stint | Exactly those dropped, with the right reasons and counts |
+| A set 3 laps old at the start of a stint | Tyre age starts at 3 |
+| Four stints 1.5 s apart on older and older tyres | Centring time *and* age gives 0.05; raw gives over 0.10; time only gives under 0.03 |
+| Fuel effect raised | Every stint's slope rises by exactly the difference |
+| Everyone pits on lap 20 | Method B refuses (share 0) |
+| A track gaining 3 s over the race | Method B finds 0.05, Method A is fooled; on a steady track both agree |
+| A team with 10 laps, a team that never ran softs | "Insufficient data", listed, no number |
+| Stints that OpenF1 gets wrong, a missing stop, cars 1 s apart | Stints rebuilt and flagged, uncertain compounds left empty, gaps 1.0 s and infinite for the leader |
+
+### Questions you might be asked
+
+- **Why Theil–Sen and not least squares?** Squared errors let one bad lap drag the line; a median of pairwise slopes doesn't care about a few. Worked example above: 0.092 s/lap of error from three laps.
+- **Where does the fuel figure come from, and what if it's wrong?** Team and press figures, 0.030–0.040 s/kg, times ~70 kg ÷ race laps. Wrong by Δ, every stint slope is wrong by exactly Δ, but the order doesn't change. The page shows the ranking at both ends of the range, and Method B checks the figure independently where it can.
+- **Why centre each stint on its median age as well as its median time?** Otherwise laps from stints run on different tyre ages contradict each other. With three or more stints, those pairs dominate and pull the slope towards zero.
+- **Why couldn't Method B use one effect per stint?** Tyre age is then lap number minus a stint constant: the age-period-cohort problem. Every slope fits equally well, and the share of independent tyre-age variation is exactly zero. A same-compound pit stop is the only thing that separates tyres from fuel and track.
+- **Why bootstrap over drivers for Method B but over laps for a stint?** Within one stint the laps are the sample. Method B learns from each driver's pair of stints, so a driver is the independent unit.
+- **Why does São Paulo show tyres getting faster?** The track was drying. B's field trend says the field gained 0.121 s/lap against 0.035 from fuel; the rest is grip, which Method A credits to the tyres.
+- **Why compute the gap from line crossings instead of OpenF1's intervals?** Same answer to 0.06 s, no missing laps, no extra download.
+- **What would you add next?** Cliff detection (a second line after a breakpoint), a track-evolution term for Method A, practice long runs (cleaner, no traffic), and a traffic rule that also sees backmarkers.
+
+### Honest weaknesses of tyre degradation
+
+- **Car, driver or race?** A slope mixes all three. Teammate comparisons control the car, not the driver's choices or the race around them.
+- **The fuel figure** predates the 2026 cars and varies by track.
+- **Track evolution** is invisible to Method A, and Method B can only check races with same-compound second stints.
+- **Races in packs** lose most of their laps to the traffic rule (Las Vegas: 54 %), so few teams get a number.
+- **Straight lines only:** a tyre that falls off a cliff late in a stint is averaged into one slope.
+
 ## Honest weaknesses (say these before they're asked)
 
 - **One lap, wet session:** the thresholds were tuned on it, and dry running may need different values.
@@ -237,6 +361,10 @@ Keep each driver's laps within 2 standard deviations of *their own* mean.
 - **Regular expressions** (`data.DELETED_LAP`): a pattern that pulls the driver code and clock time out of race-control text.
 - **`groupby("driver")[...].transform("mean")`** (`pace.sigma_filter`): works out each driver's mean and puts it on every one of their rows, so each lap is compared with its own driver's numbers. `agg` would give one row per driver instead.
 - **`Series.quantile(0.75)`**: the value 75 % of the way through the sorted laps, interpolating between two laps if needed. IQR = `quantile(0.75) - quantile(0.25)`.
-- **`np.random.default_rng(0)`**: a random-number generator with a fixed seed, so the "random" jitter is the same on every run.
+- **`np.random.default_rng(0)`**: a random-number generator with a fixed seed, so the "random" jitter (and every bootstrap interval) is the same on every run.
+- **`np.triu_indices(n, k=1)`** (`tyres.theil_sen`): the row and column numbers of every pair (i, j) with i < j, so each pair of laps is compared once.
+- **`np.linalg.lstsq(X, y)`** (`tyres.method_b_slopes`): least squares, the coefficients that make `X @ coefficients` closest to `y`. When columns are redundant it still answers, picking the smallest solution.
+- **`pd.get_dummies(values)`**: one 0/1 column per distinct value, how a category (a driver, a lap number) becomes regression columns.
+- **Bootstrap:** resample the data with replacement, refit, repeat; the spread of the answers is the uncertainty. No formula needed.
 - **`html.escape`**: turns `<`, `>`, `&` and quotes into safe codes, so text from the data can't become HTML.
 - **`st.navigation([st.Page(...), ...]).run()`**: Streamlit's multipage navigation; each `st.Page` here wraps a function, and `.run()` calls the open one.
