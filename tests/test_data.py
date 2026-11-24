@@ -187,6 +187,37 @@ def test_build_race_laps():
     assert pia[["sector_1_s", "sector_2_s", "sector_3_s"]].iloc[0].tolist() == [30.0, 40.0, 30.0]
 
 
+def test_build_tyre_laps_rebuilds_stints_and_gaps():
+    # Two drivers, four 100 s laps; PIA crosses the line 1 s behind NOR every lap.
+    # Both pit at the end of lap 2 (out-lap 3), but OpenF1's stints disagree:
+    # NOR's second stint "starts" on lap 2 (like Lawson in 2026 Las Vegas), and
+    # PIA has only one stint listed (a stop missing altogether).
+    def stamps(offset_s):
+        return [(pd.Timestamp("2026-11-22T04:00:00+00:00") + pd.to_timedelta(offset_s + 100 * i, unit="s")).isoformat()
+                for i in range(4)]
+
+    laps = pd.DataFrame({"driver_number": [4] * 4 + [81] * 4, "lap_number": [1, 2, 3, 4] * 2,
+                         "date_start": stamps(0) + stamps(1), "lap_duration": 100.0,
+                         "is_pit_out_lap": [False, False, True, False] * 2,
+                         "duration_sector_1": 30.0, "duration_sector_2": 40.0, "duration_sector_3": 30.0})
+    drivers = pd.DataFrame({"driver_number": [4, 81], "name_acronym": ["NOR", "PIA"],
+                            "team_name": ["McLaren", "McLaren"], "team_colour": ["F47600", "F47600"]})
+    stints = pd.DataFrame({"driver_number": [4, 4, 81], "lap_start": [1, 2, 1], "lap_end": [1, 4, 4],
+                           "compound": ["MEDIUM", "SOFT", "MEDIUM"], "tyre_age_at_start": [0, 3, 0]})
+    race_laps = data.build_race_laps(laps, drivers, stints, pd.DataFrame(), race_control([]))
+
+    table = data.build_tyre_laps(race_laps, laps, drivers, stints).set_index(["driver", "lap"])
+    nor, pia = table.loc["NOR"], table.loc["PIA"]
+    assert nor["stint"].tolist() == [1, 1, 2, 2]                          # from the out-lap, not OpenF1's lap 2
+    assert nor["compound"].tolist() == ["MEDIUM", "MEDIUM", "SOFT", "SOFT"]
+    assert nor["tyre_age_at_start"].tolist() == [0, 0, 3, 3]              # OpenF1's, in stint order
+    assert nor["reconstructed"].all() and not pia["reconstructed"].any()
+    assert pia["compound"].isna().all()                                   # stint counts differ: not guessed
+    assert nor["gap_ahead_s"].tolist() == [np.inf] * 4                    # leading every lap
+    assert pia["gap_ahead_s"].tolist() == pytest.approx([1.0] * 4)
+    assert nor["team"].iloc[0] == "McLaren"
+
+
 def test_build_results_statuses():
     drivers = pd.DataFrame({"driver_number": [4, 18, 77, 44], "name_acronym": ["NOR", "STR", "BOT", "HAM"],
                             "team_name": ["McLaren", "Aston Martin", "Cadillac", "Ferrari"],

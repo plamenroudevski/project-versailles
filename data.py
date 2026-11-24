@@ -550,6 +550,116 @@ def race_results(session):
     return build_results(results, openf1("drivers", session_key=key).drop_duplicates("driver_number"))
 
 
+# ---- Races: the lap table for tyres.py ------------------------------------------------
+
+def line_gaps(laps):
+    """Each car's gap to the car ahead as it crossed the line at the end of each lap, in seconds.
+
+    Worked out from the lap table itself rather than OpenF1's `intervals`
+    endpoint: every lap ends when the car crosses the line, so cars that
+    finished the same lap number, sorted by when they crossed, are in race
+    order, and the time since the car before crossed is the gap to the car
+    ahead. Checked on 2026 São Paulo and Las Vegas: it matches `intervals` to a
+    median of 0.06 s, has no missing readings, and costs no extra download
+    (`intervals` is ~25,000 rows per race).
+
+    The leader of each lap has no car ahead: their gap is infinite (np.inf),
+    which no traffic threshold can catch. A lap with no time has no end, so no gap.
+
+    Limits, shared with `intervals`: only cars on the same lap count, so a
+    car stuck behind a backmarker it's lapping looks like it's in clean air.
+    shortcut: a car ahead whose lap has no time is skipped, so the gap is
+    measured to the car before it (too big). 7 of 2,426 laps in the test
+    races; worth fixing only if a race has many untimed laps.
+    """
+    timed = laps.dropna(subset=["date_start", "lap_duration"])
+    ends = pd.to_datetime(timed["date_start"], format="ISO8601") + pd.to_timedelta(timed["lap_duration"], unit="s")
+    table = pd.DataFrame({"driver_number": timed["driver_number"].astype(int),
+                          "lap": timed["lap_number"].astype(int), "end": ends}).sort_values(["lap", "end"])
+    # diff(): the time since the previous row crossed, within the same lap number; the leader's is empty.
+    table["gap_ahead_s"] = table.groupby("lap")["end"].diff().dt.total_seconds().fillna(np.inf)
+    return table[["driver_number", "lap", "gap_ahead_s"]]
+
+
+def build_tyre_laps(race_laps, laps, drivers, stints):
+    """Extend pace.py's lap table (build_race_laps) with what tyres.py also needs.
+
+    Kept apart from the downloads (tyre_lap_table) so it can be tested without
+    internet. Adds, per lap:
+      team               team name
+      team_colour        OpenF1's hex colour, e.g. "F47600" (for charts only)
+      stint             1, 2, 3...: the driver's stints in order. A stint starts on
+                         the driver's first lap and on every pit out-lap.
+      compound           replaced by the compound of that stint (see below)
+      tyre_age_at_start  laps the set had already done when the stint began
+                         (above zero for a used set). Replaces tyre_age:
+                         tyres.py works out the age from this and the stint
+      reconstructed      True for every lap of a driver whose OpenF1 stints
+                         didn't start on their pit out-laps
+      gap_ahead_s        gap to the car ahead at the line (see line_gaps)
+
+    Why stints are rebuilt from pit out-laps: OpenF1's stint table is right
+    for almost everyone, but not always. 2026 São Paulo: Stroll's second
+    stint starts on lap 10, but he pitted on lap 16 (out-lap 17). Las Vegas:
+    Lawson's starts on lap 2, but he pitted on lap 17. So the boundaries come
+    from the out-laps (the same rule as pace.stints), and the compounds and
+    starting ages come from OpenF1's stints in the same order. If a driver
+    has a different number of stints in the two (a stop OpenF1 missed
+    altogether), the order can't be trusted: their compound is left empty,
+    so tyres.py drops their laps as "no tyre data", rather than guessing.
+
+    pace.py keeps reading build_race_laps' own columns, so its results don't change.
+    """
+    code = dict(zip(drivers["driver_number"], drivers["name_acronym"]))
+    table = race_laps.copy()  # sorted by driver, then lap (build_race_laps does that)
+    table["team"] = table["driver"].map(dict(zip(drivers["name_acronym"], drivers["team_name"])))
+    table["team_colour"] = table["driver"].map(dict(zip(drivers["name_acronym"], drivers["team_colour"])))
+    first_lap = table["lap"] == table.groupby("driver")["lap"].transform("min")
+    # cumsum over True/False counts the stint starts so far: 1 on the first stint, 2 after the first stop...
+    table["stint"] = (first_lap | table["pit_out"]).groupby(table["driver"]).cumsum()
+
+    # OpenF1's stints, numbered 1, 2, 3... per driver in the order they were run.
+    theirs = stints.assign(driver=stints["driver_number"].map(code)).sort_values(["driver", "lap_start"])
+    theirs["stint"] = theirs.groupby("driver").cumcount() + 1
+    ours = table.groupby(["driver", "stint"], as_index=False)["lap"].min().rename(columns={"lap": "start"})
+    both = ours.merge(theirs[["driver", "stint", "lap_start", "compound", "tyre_age_at_start"]],
+                      on=["driver", "stint"], how="left")
+
+    our_count = ours.groupby("driver").size()
+    # reindex: OpenF1's count for each of our drivers; a driver missing from its stints gets NaN, which never matches.
+    counts_differ = our_count != theirs.groupby("driver").size().reindex(our_count.index)
+    moved = both.groupby("driver").apply(lambda d: (d["start"] != d["lap_start"]).any(), include_groups=False)
+    both.loc[both["driver"].map(counts_differ), ["compound", "tyre_age_at_start"]] = None
+
+    # The race table's own compound and tyre_age came from OpenF1's boundaries: replace them
+    # (tyres.py works out the age from tyre_age_at_start, so there's one source for it).
+    table = table.drop(columns=["compound", "tyre_age"]).merge(both[["driver", "stint", "compound", "tyre_age_at_start"]],
+                                                 on=["driver", "stint"], how="left")
+    table["reconstructed"] = table["driver"].map(moved & ~counts_differ).fillna(False).astype(bool)
+    number = {acronym: n for n, acronym in code.items()}
+    table = table.assign(driver_number=table["driver"].map(number)).merge(
+        line_gaps(laps), on=["driver_number", "lap"], how="left").drop(columns="driver_number")
+    return table.sort_values(["driver", "lap"]).reset_index(drop=True)
+
+
+def tyre_lap_table(session):
+    """Download one race's laps, tyres, pit stops and race control, and build tyres.py's lap table.
+
+    The same five requests as race_lap_table (answered from the disk cache if
+    the race pace page has just made them), each once for the whole field.
+    """
+    key = int(session["session_key"])
+    laps = openf1("laps", session_key=key)
+    if laps.empty:
+        raise LookupError("OpenF1 has no lap times for this race yet. If it has only just finished, "
+                          "try again in about 10 minutes.")
+    drivers = openf1("drivers", session_key=key).drop_duplicates("driver_number")
+    stints = openf1("stints", session_key=key)
+    race_laps = build_race_laps(laps, drivers, stints, openf1("pit", session_key=key),
+                                openf1("race_control", session_key=key))
+    return build_tyre_laps(race_laps, laps, drivers, stints)
+
+
 # ---- Your notes ------------------------------------------------------------------
 
 NOTES_DIR = Path(__file__).parent / "notes"
