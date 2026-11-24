@@ -1,20 +1,23 @@
 """
 app.py: the Streamlit web app. User interface only.
 
-Pipeline position:  data.py -> analysis.py / pace.py -> charts.py -> app.py
+Pipeline position:  data.py -> analysis.py / pace.py / tyres.py -> charts.py -> app.py
 This file only arranges widgets and output: every number comes from
-analysis.py or pace.py and every chart from charts.py.
+analysis.py, pace.py or tyres.py and every chart from charts.py.
 
 Run it from the project folder:
     streamlit run app.py
 
-Two pages, listed at the top of the sidebar:
+Three pages, listed at the top of the sidebar:
 - Qualifying: sidebar pickers (year -> event -> session -> driver A ->
   driver B, plus an optional lap for each), then the findings, your notes,
   the charts.
 - Race pace: sidebar pickers (year -> event; the race is picked
   automatically), then a summary, your notes, and the classification or
   the lap-time distribution.
+- Tyre degradation: the same pickers, then summary cards, how the numbers
+  are made, your notes, the team chart, every counted lap, the fuel
+  sensitivity and the full tables.
 - Driver laps (not in the sidebar): every lap of one driver's race with
   sector times, opened by clicking a driver's name on the Race pace page.
 
@@ -47,6 +50,7 @@ import analysis
 import charts
 import data
 import pace
+import tyres
 
 CACHE_TTL_S = 600
 # Remembered answers expire after 10 minutes (like data.CACHE_EXPIRY_S), so a
@@ -107,6 +111,21 @@ def race_pace(session_key):
     session = data.get_session(session_key)
     laps = data.race_lap_table(session)
     return {"session": session, "laps": laps, "run": pace.analyse(laps, data.race_results(session)),
+            "rain": data.session_had_rain(session_key)}
+
+
+@st.cache_data(ttl=CACHE_TTL_S, max_entries=20, show_spinner="Loading every lap and fitting tyre degradation...")
+def tyre_model(session_key):
+    """The race's session details and the finished tyres.analyse() result, remembered per race.
+
+    The fits (bootstraps included) take a second or two, so the result is
+    cached, not just the downloads: changing nothing but re-running the page,
+    or coming back to a race, costs no requests and no maths. The downloads
+    are the same five as the race pace page's, so after that page they come
+    from the disk cache.
+    """
+    session = data.get_session(session_key)
+    return {"session": session, "run": tyres.analyse(data.tyre_lap_table(session)),
             "rain": data.session_had_rain(session_key)}
 
 
@@ -198,6 +217,19 @@ def pick_event():
     event_labels = {int(e.meeting_key): f"{pd.Timestamp(e.date_start):%d %b} · {e.meeting_name}"
                     for e in season.itertuples()}
     return st.sidebar.selectbox("Event", list(event_labels), format_func=event_labels.get)
+
+
+def pick_race():
+    """Year and event pickers, then the event's race (picked automatically; sprints aren't covered).
+
+    Returns the race's session_key, or stops the page if the event has no race yet.
+    """
+    meeting_key = pick_event()
+    event_sessions = sessions(meeting_key)
+    names = [] if event_sessions.empty else event_sessions["session_name"].tolist()
+    if "Race" not in names:
+        stop("This event has no race yet: it hasn't started, or it was cancelled. Pick another event.")
+    return int(event_sessions["session_key"].iloc[names.index("Race")])
 
 
 # ---- Page 1: Qualifying (compare two laps) --------------------------------------------
@@ -313,12 +345,7 @@ def race_pace_page():
     # Sidebar: year and event only. The race is picked automatically (sprints aren't covered).
     st.sidebar.header("Race pace")
     try:
-        meeting_key = pick_event()
-        event_sessions = sessions(meeting_key)
-        names = [] if event_sessions.empty else event_sessions["session_name"].tolist()
-        if "Race" not in names:
-            stop("This event has no race yet: it hasn't started, or it was cancelled. Pick another event.")
-        session_key = int(event_sessions["session_key"].iloc[names.index("Race")])
+        session_key = pick_race()
         run = race_pace(session_key)
     except LookupError as error:  # data.py's "missing data" messages are written for you
         stop(str(error), st.warning)
@@ -403,10 +430,99 @@ def driver_laps_page():
     st.caption(f"Counted: used for the median race pace. {pace.FILTER_RULE}")
 
 
+# ---- Page 4: Tyre degradation -----------------------------------------------------------
+
+def tyres_page():
+    """How much lap time each car lost per lap of tyre age, per compound: an indicator, not a verdict.
+
+    Order: summary cards (the answer first), how the numbers are made, your
+    notes, then the team chart (which the cards summarise), every lap with
+    each stint's line, the fuel sensitivity, and the full tables.
+    """
+    st.sidebar.header("Tyre degradation")
+    try:
+        session_key = pick_race()
+        model = tyre_model(session_key)
+    except LookupError as error:  # data.py's "missing data" messages are written for you
+        stop(str(error), st.warning)
+    except requests.RequestException as error:
+        stop(f"Couldn't reach OpenF1 ({error}). Try again in a minute.", st.error)
+    st.sidebar.caption("Data: OpenF1 (2023 onwards).")
+
+    session, run = model["session"], model["run"]
+    st.subheader(f"{session['year']} {session['location']} race: tyre degradation")
+    if model["rain"]:
+        st.warning(RAIN_WARNING + " Intermediate and wet-tyre laps are excluded; slick laps on a drying track "
+                                  "can look like they get faster with age.")
+    if not run["traffic"]:
+        st.warning("No gap-to-car-ahead data for this race, so laps in traffic weren't removed.")
+    if run["counts"]["kept"] == 0:
+        stop("No laps were left to fit in this race after the filters below.")
+
+    # Answer-first summary: two cards per row, each a bordered box.
+    st.markdown("#### Summary")
+    cards = tyres.summary_cards(run)
+    for start in range(0, len(cards), 2):
+        for column, (heading, text) in zip(st.columns(2), cards[start:start + 2]):
+            with column.container(border=True):
+                st.markdown(f"**{heading}**  \n{plain(text)}")
+
+    # How the numbers are made: normal text size (not a grey caption), because the caveats matter.
+    st.markdown("#### How these numbers are made")
+    st.markdown("\n".join(f"- {plain(line)}" for line in tyres.method_text(run)))
+
+    # Your notes for this race, e.g. notes/2026_sao_paulo_R_tyres.md ("tyres" in place of a driver pair).
+    show_notes(data.notes_path(session, ("tyres",)))
+
+    plotly_config = {"displaylogo": False}
+    st.markdown("#### Degradation by team")
+    st.plotly_chart(charts.tyre_teams_figure(run), theme=None, config=plotly_config)
+    st.caption("Lowest degradation at the top. A hollow dot: the interval includes zero (not distinguishable "
+               "from flat). Grey teams didn't have enough laps. The faint band, where shown, is Method B's "
+               "whole-field estimate, which needs no fuel figure.")
+    st.markdown("#### Every counted lap")
+    st.plotly_chart(charts.tyre_scatter_figure(run), theme=None, config=plotly_config)
+    st.caption("One dot per lap; teammates have different shapes. Lines are each stint's fit: solid for a "
+               "driver's first stint, dashed for the second, dotted for the third. Click a team in the key to "
+               "hide or show it.")
+    st.markdown("#### Does the fuel assumption change the ranking?")
+    st.plotly_chart(charts.tyre_sensitivity_figure(run), theme=None, config=plotly_config)
+    st.caption("Flat lines: the same order at every fuel value. Hover for each team's slope.")
+
+    with st.expander("Tables: every stint, every team, and the laps left out"):
+        order = run["stints"]["compound"].map(tyres.SLICKS.index)  # softs, mediums, hards: not alphabetical
+        stints = run["stints"].assign(order=order).sort_values(["order", "slope"])
+        st.markdown("**Every fitted stint** (fuel-corrected, default fuel value)")
+        st.dataframe(pd.DataFrame({
+            "Driver": stints["driver"], "Team": stints["team"], "Tyre": stints["compound"].str.title(),
+            "Stint": stints["stint"], "Laps": stints["first_lap"].astype(str) + "–" + stints["last_lap"].astype(str),
+            "Tyre age": stints["ages"], "Counted": stints["laps"], "s/lap": stints["slope"],
+            "Low": stints["low"], "High": stints["high"],
+            "Flags": [", ".join(f for f, on in (("flat?", flat), ("negative", neg), ("rebuilt from pit stops", rec))
+                                if on) for flat, neg, rec in zip(stints["flat"], stints["negative"],
+                                                                    stints["reconstructed"])],
+        }), hide_index=True, column_config={c: st.column_config.NumberColumn(format="%+.3f")
+                                            for c in ("s/lap", "Low", "High")})
+        st.markdown("**Every team** (both drivers pooled)")
+        teams = run["teams"]
+        st.dataframe(pd.DataFrame({
+            "Tyre": teams["compound"].str.title(), "Team": teams["team"], "Counted laps": teams["laps"].astype(int),
+            "Stints": teams["stints"], "s/lap": teams["slope"], "Low": teams["low"], "High": teams["high"],
+            "Over 10 laps (s)": teams["loss_10"], "Status": teams["status"],
+        }), hide_index=True, column_config={c: st.column_config.NumberColumn(format="%+.3f")
+                                            for c in ("s/lap", "Low", "High", "Over 10 laps (s)")})
+        counts = run["counts"]
+        st.markdown(f"**Laps left out** ({counts['laps'] - counts['kept']:,} of {counts['laps']:,}). Stints: "
+                    f"{counts['stints_fitted']} fitted, {counts['stints_short']} too short, "
+                    f"{counts['stints_no_laps']} with no laps left.")
+        st.dataframe(pd.Series(counts["dropped"], name="Laps").rename_axis("Reason").reset_index(), hide_index=True)
+
+
 # ---- Navigation -------------------------------------------------------------------------
 # Lists the pages at the top of the sidebar and runs the one that's open.
 st.navigation([
     st.Page(qualifying_page, title="Qualifying", icon=":material/timer:", default=True),
     st.Page(race_pace_page, title="Race pace", icon=":material/leaderboard:", url_path="race-pace"),
+    st.Page(tyres_page, title="Tyre degradation", icon=":material/tire_repair:", url_path="tyres"),
     st.Page(driver_laps_page, title="Driver laps", icon=":material/table:", url_path="driver", visibility="hidden"),
 ]).run()
