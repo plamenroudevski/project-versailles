@@ -105,16 +105,19 @@ def comparison(session_key, name_a, name_b, lap_a, lap_b):
 
 
 @st.cache_data(ttl=CACHE_TTL_S, max_entries=20, show_spinner="Building the replay...")
-def replay_player(session_key, name_a, name_b, lap_a, lap_b):
-    """The finished replay player page (HTML), remembered per session, driver pair and laps.
+def replay_payload(session_key, name_a, name_b, lap_a, lap_b):
+    """The replay's data (replay.build_payload), remembered per session, driver pair and laps.
 
     It starts from comparison(), the same remembered result the Qualifying
-    page uses, so a pair you've already compared costs no downloads.
+    page uses, so a pair you've already compared costs no downloads. Only the
+    data is remembered, not the finished player page: the page is rebuilt on
+    every run (a quick file read), so a fix to replay_player.html goes live
+    at once instead of after the 10-minute cache.
     """
     run = comparison(session_key, name_a, name_b, lap_a, lap_b)
     session = run["session"]
     rotation = data.get_rotation(int(session["year"]), int(session["circuit_key"]))
-    return replay.player_html(replay.build_payload(run, rotation))
+    return replay.build_payload(run, rotation)
 
 
 @st.cache_data(ttl=CACHE_TTL_S, max_entries=20, show_spinner="Loading every lap of the race...")
@@ -558,7 +561,7 @@ def replay_page():
     st.sidebar.header("Lap replay")
     session_key, name_a, name_b, lap_a, lap_b = pick_pair()
     try:
-        page = replay_player(session_key, name_a, name_b, lap_a, lap_b)
+        page = replay.player_html(replay_payload(session_key, name_a, name_b, lap_a, lap_b))
     except LookupError as error:  # data.py's "missing data" messages are written for you
         stop(str(error), st.warning)
     except requests.RequestException as error:

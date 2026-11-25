@@ -1,6 +1,6 @@
-# Project Versailles: F1 qualifying telemetry, race pace and tyre degradation analyser
+# Project Versailles: F1 qualifying telemetry, race pace, tyre degradation and lap replay
 
-Compares two drivers' qualifying laps from real F1 telemetry and shows **where** one gains or loses time and the **likely reason**, corner by corner. A second page, **Race pace**, ranks every driver in a race by their median lap time over clean racing laps: who was actually fastest, as opposed to who finished where ([method below](#race-pace-method)). A third, **Tyre degradation**, estimates how much lap time each car lost per lap of tyre age, per compound ([method below](#tyre-degradation-method)).
+Compares two drivers' qualifying laps from real F1 telemetry and shows **where** one gains or loses time and the **likely reason**, corner by corner. A second page, **Race pace**, ranks every driver in a race by their median lap time over clean racing laps: who was actually fastest, as opposed to who finished where ([method below](#race-pace-method)). A third, **Tyre degradation**, estimates how much lap time each car lost per lap of tyre age, per compound ([method below](#tyre-degradation-method)). A fourth, **Lap replay**, replays two drivers' laps together on a large track map, like a live-timing screen, with the telemetry synced underneath ([how it works below](#lap-replay)).
 
 **Live app: https://project-versailles.streamlit.app/** (any session from 2023 onwards; the app sleeps when unused, so the first visit can take a minute)
 
@@ -98,6 +98,19 @@ The **Tyre degradation** page estimates how much lap time each car lost per lap 
 - **Car or driver?** A steeper slope can be the car, a driver managing a gap, or a stint spent fighting. Teammate comparisons help, but can't separate them.
 - Wet tyres are never fitted; race sessions only.
 
+## Lap replay
+
+Answers one question: **which part of the track is this bit of telemetry about?** Pick two laps (the same pickers as Qualifying; race laps work too) and press play.
+
+- **Track map first:** a large map in the circuit's official orientation, with corner numbers on leader lines, sector ticks and a start/finish line. It's cut into 25 mini-sectors, each grey until both cars have passed it, then painted in the faster driver's colour.
+- **Car markers** carry the driver number and follow each car's real timing from the line. Overlapping cars are pushed apart sideways, and each car stops on the line when its lap ends.
+- **Sector strip:** each sector time appears as the car crosses that sector's line, and the faster one is highlighted. When both cars have finished, the lap result shows large ("ANT faster by 0.258 s").
+- **Telemetry panel** (48 px below the map, in its own box): speed, throttle with brake bands, and the running gap, on one distance axis. The cursor follows the leading car.
+- **Hover either way:** hover a trace and a ring marks that spot on the map; hover the map and the traces jump there, with every value read out.
+- **Play, pause, scrub, 0.25× to 2× and the space bar** all run in your browser, inside a self-contained player (no CDN). They never re-run the Streamlit script.
+
+Times come straight from OpenF1: the payload's lap and sector times match the official ones to the millisecond (checked on 2026 Las Vegas qualifying and race). The car-number font is Archivo (SIL Open Font License, in `assets/fonts/`); see `assets/README.md` to swap in a licensed team font.
+
 ## Limitations
 
 - **One lap proves nothing on its own.** Findings describe *this* lap; traffic, tyre preparation or a mistake can dominate.
@@ -106,6 +119,7 @@ The **Tyre degradation** page estimates how much lap time each car lost per lap 
 - **2026 cars.** There's no DRS or active-aero channel, so straight-line findings can't separate aero mode from energy deployment, and there's no energy or battery data.
 - **Corner positions are approximate** (MultiViewer), and thresholds were tuned on a wet session. Expect to revisit them for dry running.
 - **Data coverage:** 2023 onwards (OpenF1). F1's own live-timing archive now requires an F1 TV subscription, which is why FastF1's session loader isn't used for telemetry.
+- **Lap replay positions** are drawn on one track line (the faster lap's), so the two cars' racing lines aren't shown, only where each car was along the lap. Sector lines are placed from the faster lap's sector times, since OpenF1 doesn't give their positions.
 - **Rate limits.** OpenF1's free tier allows 30 requests a minute, shared by every visitor of the hosted app. Responses are cached for 10 minutes and rate-limited requests are retried.
 
 ## Run it locally
@@ -121,7 +135,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Terminal tools: `python analysis.py` (zone table and findings), `python charts.py` (HTML charts in `output/`), `python check_session.py` (which channels a session provides). Each takes `YEAR PLACE SESSION A B`, e.g. `2026 Brazil Qualifying NOR RUS`. For race pace, give just `YEAR PLACE`: `python pace.py 2026 Brazil` (ranking and summary), `python charts.py 2026 Brazil` (timing tower and box plot in `output/`). For tyre degradation: `python tyres.py 2026 Brazil` (every table) and `python charts.py 2026 Brazil tyres` (three charts in `output/`).
+Terminal tools: `python analysis.py` (zone table and findings), `python charts.py` (HTML charts in `output/`), `python check_session.py` (which channels a session provides). Each takes `YEAR PLACE SESSION A B`, e.g. `2026 Brazil Qualifying NOR RUS`. For race pace, give just `YEAR PLACE`: `python pace.py 2026 Brazil` (ranking and summary), `python charts.py 2026 Brazil` (timing tower and box plot in `output/`). For tyre degradation: `python tyres.py 2026 Brazil` (every table) and `python charts.py 2026 Brazil tyres` (three charts in `output/`). For the lap replay: `python replay.py 2026 "Las Vegas" Qualifying ANT VER` checks the payload's times against OpenF1's and writes a standalone player to `output/` (add two lap numbers for other laps, e.g. `... Race ANT VER 43 50`).
 
 **Your own notes:** add Markdown files in `notes/` (the app creates an empty one with one click when run locally). They show under the findings, and online once committed. Race pace notes use `pace` in place of the driver pair, e.g. `notes/2026_sao_paulo_R_pace.md`, and tyre notes use `tyres`: `notes/2026_sao_paulo_R_tyres.md`.
 
@@ -133,8 +147,11 @@ Terminal tools: `python analysis.py` (zone table and findings), `python charts.p
 | [`analysis.py`](analysis.py) | The qualifying analysis engine: pure functions, runnable from a script |
 | [`pace.py`](pace.py) | The race pace engine: pure functions on a plain lap table, runnable from a script |
 | [`tyres.py`](tyres.py) | The tyre degradation model: pure functions on a plain lap table, runnable from a script |
+| [`replay.py`](replay.py) | The lap replay's data: one JSON payload (laps on a 1 m grid, sectors, corners, rotated map) poured into the player |
+| [`replay_player.html`](replay_player.html) | The lap replay player: SVG map, canvas traces and the animation loop, in one self-contained file |
+| [`assets/`](assets) | Files the player embeds: the car-number font and its licence |
 | [`charts.py`](charts.py) | Plotly figures, the race pace timing tower (HTML) and the tyre charts |
-| [`app.py`](app.py) | Streamlit user interface only: the Qualifying, Race pace and Tyre degradation pages |
+| [`app.py`](app.py) | Streamlit user interface only: the Qualifying, Race pace, Tyre degradation and Lap replay pages |
 | [`check_session.py`](check_session.py) | Reports which telemetry channels a session actually has |
 | [`tests/`](tests) | pytest, using made-up laps with hand-checked answers |
 

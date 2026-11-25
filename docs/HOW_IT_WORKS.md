@@ -1,6 +1,6 @@
 # How it works
 
-Your revision guide: the whole pipeline from raw data to findings, the reasoning behind each choice, and the questions you're likely to be asked. Numbers come from the acceptance test: **Norris vs Russell, 2026 São Paulo qualifying** (wet). The race pace page has its own section, [9. Race pace method](#9-race-pace-method-pacepy), tested on the **2026 São Paulo race**. Tyre degradation is [10. Tyre degradation method](#10-tyre-degradation-method-tyrespy), tested on the **2026 São Paulo and Las Vegas races**.
+Your revision guide: the whole pipeline from raw data to findings, the reasoning behind each choice, and the questions you're likely to be asked. Numbers come from the acceptance test: **Norris vs Russell, 2026 São Paulo qualifying** (wet). The race pace page has its own section, [9. Race pace method](#9-race-pace-method-pacepy), tested on the **2026 São Paulo race**. Tyre degradation is [10. Tyre degradation method](#10-tyre-degradation-method-tyrespy), tested on the **2026 São Paulo and Las Vegas races**. The lap replay is [11. Lap replay](#11-lap-replay-replaypy-replay_playerhtml), tested on **2026 Las Vegas** qualifying and race laps.
 
 ## The 30-second version
 
@@ -20,7 +20,8 @@ OpenF1 (laps, telemetry, position, weather, race control,    MultiViewer via Fas
                              |
                           charts.py    Plotly figures, the race pace timing tower, the tyre charts
                              |
-                          app.py       Streamlit pages (UI only): Qualifying, Race pace, Tyre degradation
+          replay.py    analysis.compare result -> sectors, rotated map, corners -> JSON -> replay_player.html
+                          app.py       Streamlit pages (UI only): Qualifying, Race pace, Tyre degradation, Lap replay
 ```
 
 Each file only talks to the one before it. `analysis.py`, `pace.py` and `tyres.py` have no downloads and no Streamlit, which is what makes them testable with made-up laps.
@@ -332,6 +333,45 @@ São Paulo: 641 of 1,437 laps kept (459 on inters, 182 in traffic). Las Vegas: 2
 - **Races in packs** lose most of their laps to the traffic rule (Las Vegas: 54 %), so few teams get a number.
 - **Straight lines only:** a tyre that falls off a cliff late in a stint is averaged into one slope.
 
+## 11. Lap replay (`replay.py`, `replay_player.html`)
+
+### The 30-second version
+
+> "Python does all the maths once: it reuses the qualifying comparison (both laps on a 1 m grid, the running gap, the 25 mini-sector winners), adds the official sector times, works out where each sector ends on track, turns the map to its official orientation, and packs it all into one JSON payload. The browser then does only the animation, in a self-contained HTML/JavaScript player. So playing, pausing and scrubbing never go back to Python or re-run Streamlit."
+
+### Building the payload (`replay.build_payload`)
+
+- **Nothing re-derived:** `analysis.load_and_compare()` already gives both laps on the shared grid, the gap `t_B(d) - t_A(d)` and `mini_sector_winners`. The replay page starts from the same cached `comparison()` as the Qualifying page.
+- **Where a car is at replay time t:** each driver's elapsed time at every metre only ever increases, so it can be read backwards (time to distance) with a binary search and interpolation. After its lap time, a car stays on the finish line.
+- **Sector times** come from OpenF1's lap row (`duration_sector_1..3`). **Sector lines** aren't in OpenF1, so they go where the faster lap's elapsed time reaches S1, then S1 + S2 (`sector_ends`). A driver with no official sectors gets them derived from those lines (flagged in the player).
+- **Map orientation:** MultiViewer's rotation for the circuit (`data.get_rotation`), so the track looks like the official map. The outline is the faster lap's X/Y.
+- **Corners:** each label is anchored on the drawn track line, pointing in MultiViewer's label direction. The player moves a label further out, or to the other side, if it would land on other track or another label.
+- **RPM** is now kept in the telemetry table, for the readout.
+
+### The player (`replay_player.html`)
+
+- **Map in SVG, traces in canvas.** The map is redrawn only on resize. Each frame moves two markers and repaints any mini-sector whose state changed. The traces are drawn once on a bottom canvas, and the cursor lives on a top canvas that is cleared every frame, so 6,000-point lines aren't redrawn 60 times a second. One frame's work measured about 0.8 ms, against a 16.7 ms budget at 60 fps.
+- **The clock:** `requestAnimationFrame` calls `frame()` before each screen refresh. The replay clock advances by the real time since the last frame times the speed, so 1× is real time on any screen.
+- **Fits its frame:** an embedded component can't size itself, so the app gives it 1,500 px (`replay.PLAYER_HEIGHT`) and the map takes whatever height is left (CSS flexbox). A narrower window shrinks the map and never cuts off the controls.
+- **Safety:** every name or team from the data is inserted as text (`textContent`), never as HTML, and `</` is escaped in the JSON so it can't close the script tag.
+
+### Log: what went wrong at launch, and the fixes
+
+- **25 Nov 2026: Play did nothing on the live app** (it worked locally). The loop booked its next frame at the *end* of `frame()`. Browsers run animation frames before they report a page's size, so the very first frame could run before the map was drawn. Moving the not-yet-created car markers threw an error, and the loop never booked another frame. Play then only flipped a flag that nothing read. Whether it happened depended on timing, which is why it showed up on the hosted app and not in local tests. **Fix (commit 39e3766):** `frame()` books the next frame first, and waits until the map exists. Lesson: in an animation loop, schedule the next frame before anything that can fail.
+- **25 Nov 2026: the default pair showed only 'RPM' for ~10 minutes after the first push.** The hosted app kept comparisons cached from *before* the push (`@st.cache_data`, 10 minutes), and those had no RPM column. It cleared by itself. Any push that adds a column can do this briefly; rebooting the app in Streamlit Cloud clears it at once.
+- **25 Nov 2026: the Play fix didn't reach the live page straight away.** The app cached the *finished player page*, so the old, broken player kept being served for up to 10 minutes after the fix was pushed. **Fix:** the app now caches only the replay's data (`replay_payload`) and rebuilds the page on every run, which is a quick file read. A change to `replay_player.html` now goes live as soon as the app redeploys.
+
+### Tests
+
+`tests/test_replay.py`: sector lines on a constant-speed lap land at hand-worked distances, a lap without official sectors gets the right derived times from the other lap's lines, no sector times anywhere means no lines, and the rotation turns the right way. In the browser: lap and sector times match OpenF1 to the millisecond, the map-to-telemetry gap measures 48 px, and play and scrub leave Streamlit idle.
+
+### Honest weaknesses of the replay
+
+- **One track line:** both cars are drawn on the faster lap's line, so differences in racing line aren't shown.
+- **Sector lines are inferred** from sector times (OpenF1 has no positions for them), to within a few metres.
+- **Brake is on/off,** as everywhere in this app.
+- **Not live:** it replays finished laps. Live timing is out of scope.
+
 ## Honest weaknesses (say these before they're asked)
 
 - **One lap, wet session:** the thresholds were tuned on it, and dry running may need different values.
@@ -355,6 +395,7 @@ São Paulo: 641 of 1,437 laps kept (459 on inters, 182 in traffic). Las Vegas: 2
 
 - **`np.interp(x, xp, fp)`**: linear interpolation. "Given known points (xp, fp), what's the value at x?" It's used for every resample.
 - **`DataFrame.loc[...]` and `idxmin()`**: select rows by label or condition; `idxmin` gives the row label of the minimum (the apex).
+- **`requestAnimationFrame(frame)`** (JavaScript): "call `frame` before the next screen refresh". Calling it again inside `frame` makes a loop that runs once per refresh, and pauses itself when the tab is hidden.
 - **Decorators (`@st.cache_data`)**: a line above a function that wraps it with extra behaviour, here memoising results.
 - **`**params`**: collects keyword arguments into a dictionary (turned into URL filters in `data.openf1`).
 - **Opening a file with mode `"x"`**: create the file, and fail if it exists, so notes can't be overwritten.
