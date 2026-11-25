@@ -18,6 +18,8 @@ Three pages, listed at the top of the sidebar:
 - Tyre degradation: the same pickers, then summary cards, how the numbers
   are made, your notes, the team chart, every counted lap, the fuel
   sensitivity and the full tables.
+- Lap replay: the same pickers as Qualifying, then both laps replayed side
+  by side on the track map with synced telemetry (replay.py builds it).
 - Driver laps (not in the sidebar): every lap of one driver's race with
   sector times, opened by clicking a driver's name on the Race pace page.
 
@@ -45,11 +47,13 @@ from urllib.parse import urlparse
 import pandas as pd
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 import analysis
 import charts
 import data
 import pace
+import replay
 import tyres
 
 CACHE_TTL_S = 600
@@ -98,6 +102,19 @@ def laps(session_key, acronym):
 def comparison(session_key, name_a, name_b, lap_a, lap_b):
     # max_entries: keep at most 20 comparisons in memory (free hosting has little).
     return analysis.load_and_compare(data.get_session(session_key), name_a, name_b, lap_a, lap_b)
+
+
+@st.cache_data(ttl=CACHE_TTL_S, max_entries=20, show_spinner="Building the replay...")
+def replay_player(session_key, name_a, name_b, lap_a, lap_b):
+    """The finished replay player page (HTML), remembered per session, driver pair and laps.
+
+    It starts from comparison(), the same remembered result the Qualifying
+    page uses, so a pair you've already compared costs no downloads.
+    """
+    run = comparison(session_key, name_a, name_b, lap_a, lap_b)
+    session = run["session"]
+    rotation = data.get_rotation(int(session["year"]), int(session["circuit_key"]))
+    return replay.player_html(replay.build_payload(run, rotation))
 
 
 @st.cache_data(ttl=CACHE_TTL_S, max_entries=20, show_spinner="Loading every lap of the race...")
@@ -232,11 +249,14 @@ def pick_race():
     return int(event_sessions["session_key"].iloc[names.index("Race")])
 
 
-# ---- Page 1: Qualifying (compare two laps) --------------------------------------------
+def pick_pair():
+    """Sidebar pickers for two laps: event, session, qualifying part, two drivers and a lap each.
 
-def qualifying_page():
-    # Sidebar: what to compare
-    st.sidebar.header("Compare two laps")
+    Shared by the Qualifying and Lap replay pages. Opens on the event's
+    qualifying and its two fastest drivers' fastest laps; any session and
+    any lap (race laps included) can be picked.
+    Returns (session_key, name_a, name_b, lap_a, lap_b); a lap is None for "fastest valid lap".
+    """
     try:
         meeting_key = pick_event()
 
@@ -272,7 +292,15 @@ def qualifying_page():
     except requests.RequestException as error:
         stop(f"Couldn't reach OpenF1 ({error}). Try again in a minute.", st.error)
     st.sidebar.caption("Data: OpenF1 (2023 onwards). Corner positions: MultiViewer, via FastF1.")
+    return session_key, name_a, name_b, lap_a, lap_b
 
+
+# ---- Page 1: Qualifying (compare two laps) --------------------------------------------
+
+def qualifying_page():
+    # Sidebar: what to compare
+    st.sidebar.header("Compare two laps")
+    session_key, name_a, name_b, lap_a, lap_b = pick_pair()
 
     # Main area: findings, then charts
     try:
@@ -518,11 +546,37 @@ def tyres_page():
         st.dataframe(pd.Series(counts["dropped"], name="Laps").rename_axis("Reason").reset_index(), hide_index=True)
 
 
+# ---- Page 5: Lap replay -----------------------------------------------------------------
+
+def replay_page():
+    """Two laps replayed together on the track map, with the telemetry underneath.
+
+    Python builds the player once (replay.py); playing, pausing, scrubbing
+    and hovering then run in your browser, inside the embedded player, so
+    they never re-run this script.
+    """
+    st.sidebar.header("Lap replay")
+    session_key, name_a, name_b, lap_a, lap_b = pick_pair()
+    try:
+        page = replay_player(session_key, name_a, name_b, lap_a, lap_b)
+    except LookupError as error:  # data.py's "missing data" messages are written for you
+        stop(str(error), st.warning)
+    except requests.RequestException as error:
+        stop(f"Couldn't reach OpenF1 ({error}). Try again in a minute.", st.error)
+    # components.html puts the page in its own frame, where its JavaScript runs. It can't size
+    # itself to its content, so the height comes from replay.py (matched to the player's layout).
+    components.html(page, height=replay.PLAYER_HEIGHT)
+    st.caption("Space bar: play or pause. Hover the map or the traces to find the same spot in the other. "
+               "Mini-sectors take the faster driver's colour once both cars have passed them. "
+               "Gap: positive means the second driver is behind.")
+
+
 # ---- Navigation -------------------------------------------------------------------------
 # Lists the pages at the top of the sidebar and runs the one that's open.
 st.navigation([
     st.Page(qualifying_page, title="Qualifying", icon=":material/timer:", default=True),
     st.Page(race_pace_page, title="Race pace", icon=":material/leaderboard:", url_path="race-pace"),
     st.Page(tyres_page, title="Tyre degradation", icon=":material/tire_repair:", url_path="tyres"),
+    st.Page(replay_page, title="Lap replay", icon=":material/play_circle:", url_path="replay"),
     st.Page(driver_laps_page, title="Driver laps", icon=":material/table:", url_path="driver", visibility="hidden"),
 ]).run()

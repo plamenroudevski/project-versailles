@@ -313,7 +313,7 @@ def build_telemetry(car, pos, start):
       Time      seconds since the car crossed the start line (padding samples
                 are slightly negative, or later than the lap time)
       Distance  metres from the start line, from integrating speed over time
-      Speed (km/h), Throttle (%), Brake (True/False), Gear
+      Speed (km/h), Throttle (%), Brake (True/False), Gear, RPM (engine revs per minute)
       X, Y      position on track (OpenF1/MultiViewer grid, units of 0.1 m)
       DRS       raw DRS value (empty for 2026 cars, which use active aero)
     """
@@ -329,6 +329,7 @@ def build_telemetry(car, pos, start):
         "Throttle": car["throttle"].to_numpy(dtype=float),
         "Brake": car["brake"].to_numpy() > 0,
         "Gear": car["n_gear"].to_numpy(),
+        "RPM": car["rpm"].to_numpy(dtype=float),
         "DRS": car["drs"].to_numpy(),
         # Position is sampled at different instants from car data, so interpolate it onto the car-data times.
         "X": np.interp(car_t, pos_t, pos["x"].to_numpy(dtype=float)),
@@ -379,6 +380,16 @@ def get_corners(year, circuit_key):
     if circuit is None or circuit.corners.empty:
         raise LookupError("No corner positions for this circuit, so the lap can't be split into corners.")
     return circuit.corners[["X", "Y", "Number", "Letter", "Angle"]]
+
+
+def get_rotation(year, circuit_key):
+    """Degrees to turn the raw X/Y map so it matches the circuit's official map (MultiViewer's value).
+
+    The raw position grid points wherever the timing system's axes point, so
+    some circuits come out sideways or upside down. 0 if MultiViewer has nothing.
+    """
+    circuit = get_circuit_info(year=year, circuit_key=circuit_key)
+    return 0.0 if circuit is None else float(circuit.rotation)
 
 
 def session_had_rain(session_key):

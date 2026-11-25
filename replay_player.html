@@ -1,0 +1,751 @@
+<!doctype html>
+<!--
+replay_player.html: the Lap replay player. A self-contained page: no internet,
+no libraries. replay.py replaces the two placeholders below (the car-number
+font and the PAYLOAD data) and the app embeds the result with
+st.components.v1.html, inside its own little browser frame (an iframe).
+
+Everything that moves happens here, in the browser: playing, pausing,
+scrubbing and hovering never talk to Python, so they never re-run Streamlit.
+
+How it's built:
+- Track map: SVG (vector shapes), redrawn only when the window is resized.
+  Each frame only moves the two car markers and repaints mini-sectors whose
+  state changed.
+- Telemetry traces: two stacked <canvas> layers. The bottom one holds the
+  traces, drawn once. The top one holds the cursor, cleared and redrawn every
+  frame. Redrawing 6,000-point lines 60 times a second would be the slow part,
+  and the layer split avoids it.
+- The animation loop: requestAnimationFrame calls frame() before every screen
+  refresh (60 times a second). frame() advances the replay clock by the real
+  time since the last frame times the speed, so playback speed is right on
+  any screen.
+
+Distances are metres from the start line. Both laps share one distance grid
+(1 m steps, built in analysis.align_laps), so "grid index i" is the same
+place on track for both drivers.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+/*__FONT_FACE__*/
+
+/* Theme: the Versailles dark palette (see charts.py and .streamlit/config.toml). Only two
+   driver colours carry meaning; everything else is white, mid-grey or a dark surface. */
+:root {
+  --bg: #0E1117;        /* page background, same as the app */
+  --panel: #151A23;     /* surfaces: sector boxes, telemetry panel, control bar */
+  --line: #2A303C;      /* borders and faint gridlines */
+  --track: #232935;     /* the track's dark outer edge */
+  --unpainted: #4D5360; /* a mini-sector neither car has finished yet */
+  --text: #FAFAFA;
+  --muted: #8B8F98;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text);
+  font-family: "Archivo", "Segoe UI", system-ui, sans-serif; font-size: 15px; }
+.num { font-variant-numeric: tabular-nums; }  /* every digit the same width: numbers don't wobble as they change */
+/* The player fills its frame exactly: every block keeps its natural height and the map takes what's
+   left (flex: 1). So the control bar can never be cut off, whatever the frame's height. */
+html, body { height: 100%; }
+#app { height: 100%; display: flex; flex-direction: column; padding: 2px 2px 8px; }
+#app > * { flex: none; }
+
+/* 1. Header row */
+header { display: flex; align-items: center; gap: 22px; flex-wrap: wrap; min-height: 52px; }
+.title { font-size: 19px; font-weight: 600; margin-right: auto; }
+.chip { display: flex; align-items: center; gap: 10px; }
+.chip .swatch { width: 6px; height: 34px; border-radius: 3px; }
+.chip .code { font-size: 19px; font-weight: 700; letter-spacing: 0.02em; }
+.chip .meta { color: var(--muted); font-size: 12px; }
+.chip .time { font-size: 19px; margin-left: 6px; }
+.lap-delta { font-size: 17px; font-weight: 700; padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px; }
+
+/* 2. Sector strip */
+.sectors { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 12px; }
+.sector { background: var(--panel); border: 1px solid var(--line); border-top: 3px solid var(--line);
+  border-radius: 10px; padding: 8px 14px; }
+.sector h3 { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.sector .row { display: flex; justify-content: space-between; align-items: baseline; font-size: 16px; line-height: 1.55; }
+.sector .row .diff { color: var(--muted); font-size: 13px; margin-left: 8px; }
+.sector .note { color: var(--muted); font-size: 12px; }
+
+/* Status line between the sectors and the map: replay clock and who leads; the result at the end */
+.status { height: 44px; margin-top: 10px; display: flex; align-items: center; justify-content: center;
+  font-size: 16px; color: var(--muted); }
+.status.final { font-size: 26px; font-weight: 700; }
+
+/* 3. Track map: the hero. Generous height; the map is fitted inside with padding (see layoutMap). */
+#app > .map-wrap { position: relative; flex: 1 1 auto; min-height: 420px; }
+svg#map { display: block; width: 100%; height: 100%; }
+.corner-label { font-size: 13px; font-weight: 700; fill: #D5D8DE; text-anchor: middle; dominant-baseline: central;
+  paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round; }
+.sector-label { font-size: 12px; font-weight: 600; fill: var(--muted); text-anchor: middle; dominant-baseline: central;
+  paint-order: stroke; stroke: var(--bg); stroke-width: 4px; }
+.car-number { font-size: 14px; text-anchor: middle; dominant-baseline: central; }
+
+/* 4-5. Telemetry panel: its own container, 48 px clear of the map (the brief's minimum). */
+.telemetry { margin-top: 48px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  padding: 12px 16px 8px; }
+.legend { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; min-height: 26px; font-size: 14px; }
+.legend .key { display: flex; align-items: center; gap: 6px; font-weight: 700; }
+.legend .key i { display: inline-block; width: 18px; height: 3px; border-radius: 2px; }
+.legend .readout { margin-left: auto; color: var(--muted); }
+.legend .readout b { color: var(--text); font-weight: 600; }
+.traces { position: relative; height: 412px; margin-top: 6px; }
+.traces canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+/* 6. Control bar */
+.controls { display: flex; align-items: center; gap: 12px; margin-top: 14px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; }
+button { font: inherit; color: var(--text); background: #222833; border: 1px solid var(--line); border-radius: 8px;
+  padding: 6px 14px; cursor: pointer; }
+button:hover { background: #2B3240; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+button.play { min-width: 96px; font-weight: 700; }
+.speeds { display: flex; gap: 4px; }
+.speeds button[aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
+input[type=range] { flex: 1; accent-color: var(--text); }
+.clock { min-width: 160px; text-align: right; color: var(--muted); }
+.clock b { color: var(--text); font-weight: 600; }
+.empty { padding: 40px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="title" id="title"></div>
+    <div class="chip" id="chip0"><div class="swatch"></div><div><div><span class="code"></span> <span class="time num"></span></div><div class="meta"></div></div></div>
+    <div class="chip" id="chip1"><div class="swatch"></div><div><div><span class="code"></span> <span class="time num"></span></div><div class="meta"></div></div></div>
+    <div class="lap-delta num" id="lapDelta"></div>
+  </header>
+  <div class="sectors" id="sectors"></div>
+  <div class="status num" id="status" aria-live="polite"></div>
+  <div class="map-wrap" id="mapWrap">
+    <svg id="map" role="img" aria-label="Track map: each mini-sector takes the colour of the faster driver once both cars have passed it"></svg>
+  </div>
+  <section class="telemetry" aria-label="Telemetry">
+    <div class="legend">
+      <span class="key" id="key0"><i></i><span></span></span>
+      <span class="key" id="key1"><i></i><span></span></span>
+      <span class="readout num" id="readout"></span>
+    </div>
+    <div class="traces" id="traces">
+      <canvas id="tracesBase"></canvas>
+      <canvas id="tracesTop"></canvas>
+    </div>
+  </section>
+  <div class="controls">
+    <button class="play" id="play" aria-label="Play">▶ Play</button>
+    <button id="restart" aria-label="Restart from the line">↺ Restart</button>
+    <input type="range" id="scrub" min="0" value="0" step="1" aria-label="Replay position">
+    <span class="clock num" id="clock"></span>
+    <div class="speeds" id="speeds" role="group" aria-label="Playback speed"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+// replay.py swaps the next line for the real data (see replay.build_payload for every key).
+const P = /*__PAYLOAD__*/null;
+
+const $ = (id) => document.getElementById(id);
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+if (!P) {
+  $("app").innerHTML = '<p class="empty">No replay data. Open this player through the app or replay.py.</p>';
+  throw new Error("no payload");
+}
+
+// ---- Data, unpacked once --------------------------------------------------------
+// Typed arrays (Float64Array) are plain number lists the browser can read very fast.
+const N = P.x.length;                     // grid points
+const LENGTH = P.length;                  // lap length, m
+const STEP = LENGTH / (N - 1);            // m between grid points (1 m)
+const X = Float64Array.from(P.x);
+const Y = Float64Array.from(P.y);
+const DELTA = Float64Array.from(P.delta); // B's time minus A's at each grid point (+ = B behind)
+const D = P.drivers.map((d) => ({
+  ...d,
+  T: Float64Array.from(d.time),           // seconds since the line, at each grid point
+  speedArr: Float64Array.from(d.speed),
+}));
+const REPLAY_END = Math.max(D[0].lap_time, D[1].lap_time);  // the replay ends when the slower car crosses the line
+const SPEEDS = [0.25, 0.5, 1, 2];
+
+// ---- Small helpers --------------------------------------------------------------
+function lapTime(s) {                      // 93.893 -> "1:33.893"
+  const m = Math.floor(s / 60);
+  return `${m}:${(s - m * 60).toFixed(3).padStart(6, "0")}`;
+}
+function signed(s) { return (s >= 0 ? "+" : "−") + Math.abs(s).toFixed(3); }
+function el(tag, attrs, parent) {          // make an SVG element with attributes
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const k in attrs) node.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(node);
+  return node;
+}
+function textOnDark(hex) {                 // black text on light car colours, white on dark ones
+  const n = parseInt(hex.slice(1), 16);
+  const lum = (0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
+  return lum > 0.55 ? "#0E1117" : "#FAFAFA";
+}
+function withAlpha(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${n >> 16}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+}
+
+// Where is a driver after `t` seconds of replay? Each driver's time-at-distance list only goes
+// up, so a binary search finds the two grid points either side of t, and we interpolate between
+// them. After their lap time, the car stays on the line (the brief's end-of-lap state).
+function distanceAt(driver, t) {
+  const T = driver.T;
+  if (t <= 0) return 0;
+  if (t >= T[N - 1]) return LENGTH;
+  let lo = 0, hi = N - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (T[mid] <= t) lo = mid; else hi = mid;
+  }
+  return (lo + (t - T[lo]) / (T[hi] - T[lo])) * STEP;
+}
+const indexAt = (d) => Math.min(N - 1, Math.max(0, Math.round(d / STEP)));
+
+// The nearest corner to a distance (within 200 m), to say "near T3" in the readout.
+function nearCorner(d) {
+  let best = null;
+  for (const c of P.corners) if (Math.abs(c.distance - d) < 200 && (!best || Math.abs(c.distance - d) < Math.abs(best.distance - d))) best = c;
+  return best;
+}
+
+// ---- 1. Header ------------------------------------------------------------------
+// Every piece of text from the data goes in with textContent (shown as text, never read as HTML).
+$("title").textContent = P.title;
+D.forEach((d, i) => {
+  const chip = $("chip" + i);
+  chip.querySelector(".swatch").style.background = d.colour;
+  chip.querySelector(".code").textContent = d.code;
+  chip.querySelector(".meta").textContent = `#${d.number} · ${d.team} · ${d.lap_label}`;
+  chip.querySelector(".time").textContent = lapTime(d.lap_time);
+  const key = $("key" + i);
+  key.querySelector("i").style.background = d.colour;
+  key.querySelector("span").textContent = d.code;
+});
+const LAP_GAP = D[1].lap_time - D[0].lap_time;          // + = B slower
+const WINNER = LAP_GAP > 0 ? 0 : LAP_GAP < 0 ? 1 : null;
+const RESULT_TEXT = WINNER === null ? "Dead heat" : `${D[WINNER].code} faster by ${Math.abs(LAP_GAP).toFixed(3)} s`;
+$("lapDelta").textContent = RESULT_TEXT;
+if (WINNER !== null) { $("lapDelta").style.color = D[WINNER].colour; $("lapDelta").style.borderColor = D[WINNER].colour; }
+
+// ---- 2. Sector strip ------------------------------------------------------------
+// A driver's sector time appears once they've crossed that sector's line in the replay, like a
+// timing screen. When both have, the faster one is highlighted and the slower shows the difference.
+const sectorBoxes = [];
+const sectorDone = D.map((d) => d.sectors ? d.sectors.map((_, k) => d.sectors.slice(0, k + 1).reduce((a, b) => a + b)) : null);
+for (let k = 0; k < 3; k++) {
+  const box = document.createElement("div");
+  box.className = "sector";
+  const h = document.createElement("h3");
+  h.textContent = `Sector ${k + 1}`;
+  box.appendChild(h);
+  const rows = D.map((d) => {
+    const row = document.createElement("div");
+    row.className = "row num";
+    const name = document.createElement("span");
+    name.textContent = d.code;
+    const value = document.createElement("span");
+    row.append(name, value);
+    box.appendChild(row);
+    return value;
+  });
+  if (k === 0 && D.some((d) => d.sectors_derived)) {
+    const note = document.createElement("div");
+    note.className = "note";
+    note.textContent = "Some sector times derived from the telemetry (none in the timing data).";
+    box.appendChild(note);
+  }
+  $("sectors").appendChild(box);
+  sectorBoxes.push({ box, rows, state: null });
+}
+function updateSectors(t) {
+  sectorBoxes.forEach((s, k) => {
+    const done = D.map((d, i) => sectorDone[i] !== null && t >= sectorDone[i][k] - 1e-9);
+    const state = done.join();
+    if (state === s.state) return;        // nothing changed since the last frame: skip the DOM work
+    s.state = state;
+    const both = done[0] && done[1];
+    const faster = both ? (D[0].sectors[k] <= D[1].sectors[k] ? 0 : 1) : null;
+    s.box.style.borderTopColor = faster === null ? "" : D[faster].colour;
+    s.rows.forEach((value, i) => {
+      value.textContent = "";
+      const row = value.parentElement;
+      row.style.color = i === faster ? D[i].colour : "";
+      row.style.fontWeight = i === faster ? "700" : "";
+      if (sectorDone[i] === null) { value.textContent = "no time"; return; }
+      if (!done[i]) { value.textContent = "—"; return; }
+      value.textContent = D[i].sectors[k].toFixed(3);
+      if (both && i !== faster) {
+        const diff = document.createElement("span");
+        diff.className = "diff";
+        diff.textContent = "+" + Math.abs(D[0].sectors[k] - D[1].sectors[k]).toFixed(3);
+        value.appendChild(diff);
+      }
+    });
+  });
+}
+
+// ---- 3. Track map ---------------------------------------------------------------
+const svg = $("map");
+const PX = new Float64Array(N), PY = new Float64Array(N);  // track line in screen pixels
+let miniPaths = [], miniState = [], cars = [], hoverRing = null, frontCar = -1;
+
+const MAP_PAD = 78;   // px of clear space around the outline: room for corner labels, nothing crowds the track
+const CAR_R = 13;     // car marker radius, px
+
+function layoutMap() {
+  const W = svg.clientWidth, H = svg.clientHeight;
+  // Fit the track into the box with MAP_PAD on every side, keeping its true shape (one scale for x and y).
+  // Screen y grows downwards and map y upwards, hence the minus signs.
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (let i = 0; i < N; i++) {
+    minX = Math.min(minX, X[i]); maxX = Math.max(maxX, X[i]);
+    minY = Math.min(minY, Y[i]); maxY = Math.max(maxY, Y[i]);
+  }
+  const scale = Math.min((W - 2 * MAP_PAD) / (maxX - minX), (H - 2 * MAP_PAD) / (maxY - minY));
+  const ox = (W - scale * (maxX - minX)) / 2 - scale * minX;
+  const oy = (H - scale * (maxY - minY)) / 2 + scale * maxY;
+  for (let i = 0; i < N; i++) { PX[i] = ox + scale * X[i]; PY[i] = oy - scale * Y[i]; }
+
+  svg.replaceChildren();  // drop the previous drawing (after a resize)
+  const pathFor = (i0, i1) => {
+    let s = `M${PX[i0].toFixed(1)} ${PY[i0].toFixed(1)}`;
+    for (let i = i0 + 1; i <= i1; i++) s += `L${PX[i].toFixed(1)} ${PY[i].toFixed(1)}`;
+    return s;
+  };
+
+  // Track: a wide dark edge under the whole lap, then the 25 mini-sectors on top.
+  el("path", { d: pathFor(0, N - 1), fill: "none", stroke: "var(--track)", "stroke-width": 20,
+               "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
+  miniPaths = P.mini.map(([start, end]) =>
+    el("path", { d: pathFor(indexAt(start), indexAt(end)), fill: "none", stroke: "var(--unpainted)",
+                 "stroke-width": 10, "stroke-linejoin": "round" }, svg));
+  miniState = P.mini.map(() => null);
+
+  // Everything placed beside the track avoids the track itself and labels already placed.
+  const placed = [];
+  const clear = (x, y, minTrack, minLabel) => {
+    for (let i = 0; i < N; i += 4) if (Math.hypot(PX[i] - x, PY[i] - y) < minTrack) return false;
+    return placed.every(([px, py]) => Math.hypot(px - x, py - y) >= minLabel);
+  };
+  const tangent = (i) => {                  // unit direction of travel at grid point i
+    const a = Math.max(0, i - 6), b = Math.min(N - 1, i + 6);
+    const dx = PX[b] - PX[a], dy = PY[b] - PY[a], len = Math.hypot(dx, dy) || 1;
+    return [dx / len, dy / len];
+  };
+  // A short line across the track at grid point i (start/finish line, sector ticks).
+  const across = (i, half, attrs) => {
+    const [tx, ty] = tangent(i);
+    el("line", { x1: PX[i] - ty * half, y1: PY[i] + tx * half, x2: PX[i] + ty * half, y2: PY[i] - tx * half,
+                 "stroke-linecap": "butt", ...attrs }, svg);
+  };
+
+  // Sector boundary ticks (short, thin) and the start/finish line (long, thick): long enough to
+  // stick out past both car markers, which sit on it at the start and the end of the replay.
+  if (P.sector_ends) for (const d of P.sector_ends) across(indexAt(d), 14, { stroke: "var(--text)", "stroke-width": 2.5 });
+  across(0, 30, { stroke: "var(--text)", "stroke-width": 5 });
+
+  // Corner numbers with leader lines, in MultiViewer's label direction (y flipped for the screen).
+  // If the label would land on other track or another label, it moves further out, then flips side.
+  for (const c of P.corners) {
+    const i = indexAt(c.distance);
+    let spot = null;
+    for (const sign of [1, -1]) {
+      for (const r of [34, 48, 62]) {
+        const x = PX[i] + sign * c.dx * r, y = PY[i] - sign * c.dy * r;
+        if (clear(x, y, 16, 24)) { spot = [x, y, r, sign]; break; }
+      }
+      if (spot) break;
+    }
+    if (!spot) spot = [PX[i] + c.dx * 34, PY[i] - c.dy * 34, 34, 1];
+    const [x, y, r, sign] = spot;
+    const ux = sign * c.dx, uy = -sign * c.dy;
+    el("line", { x1: PX[i] + ux * 13, y1: PY[i] + uy * 13, x2: PX[i] + ux * (r - 10), y2: PY[i] + uy * (r - 10),
+                 stroke: "var(--muted)", "stroke-width": 1.25 }, svg);
+    el("text", { x, y, class: "corner-label" }, svg).textContent = c.label;
+    placed.push([x, y]);
+  }
+
+  // Sector names halfway along each sector, on whichever side of the track is free.
+  if (P.sector_ends) {
+    const bounds = [0, ...P.sector_ends, LENGTH];
+    for (let k = 0; k < 3; k++) {
+      const i = indexAt((bounds[k] + bounds[k + 1]) / 2);
+      const [tx, ty] = tangent(i);
+      let spot = null;
+      for (const r of [30, 46, 62]) {
+        for (const sign of [1, -1]) {
+          const x = PX[i] - sign * ty * r, y = PY[i] + sign * tx * r;
+          if (clear(x, y, 18, 30)) { spot = [x, y]; break; }
+        }
+        if (spot) break;
+      }
+      if (!spot) continue;               // nowhere free: leave it out rather than cover something
+      el("text", { x: spot[0], y: spot[1], class: "sector-label" }, svg).textContent = `S${k + 1}`;
+      placed.push(spot);
+    }
+  }
+
+  // Hover ring (hidden until you hover a trace or the map), then the two cars on top of everything.
+  hoverRing = el("circle", { r: 11, fill: "none", stroke: "var(--text)", "stroke-width": 2.5, visibility: "hidden" }, svg);
+  cars = D.map((d) => {
+    const g = el("g", {}, svg);
+    el("circle", { r: CAR_R, fill: d.colour, stroke: "var(--bg)", "stroke-width": 2.5 }, g);
+    el("text", { class: "car-number", fill: textOnDark(d.colour), y: 0.5 }, g).textContent = d.number;
+    return g;
+  });
+  frontCar = -1;
+}
+
+// Paint a mini-sector once both cars have finished it (the faster driver's colour); grey before.
+// Only sectors whose state changed are touched, so a frame usually changes nothing here.
+function paintMiniSectors(dMin) {
+  P.mini.forEach(([, end, winner], k) => {
+    const painted = end <= dMin + 0.5;
+    if (painted === miniState[k]) return;
+    miniState[k] = painted;
+    miniPaths[k].setAttribute("stroke", painted ? D[winner].colour : "var(--unpainted)");
+  });
+}
+
+function pointAt(d) {                       // screen position at a distance along the lap
+  const f = Math.min(d / STEP, N - 1), i = Math.min(Math.floor(f), N - 2), r = f - i;
+  return [PX[i] + (PX[i + 1] - PX[i]) * r, PY[i] + (PY[i + 1] - PY[i]) * r];
+}
+
+function placeCars(dists) {
+  const pts = dists.map(pointAt);
+  // Overlapping cars are pushed apart sideways (across the track), so both numbers stay readable.
+  if (Math.hypot(pts[0][0] - pts[1][0], pts[0][1] - pts[1][1]) < 2 * CAR_R + 2) {
+    const i = indexAt(Math.min(...dists));
+    const a = Math.max(0, i - 6), b = Math.min(N - 1, i + 6);
+    const dx = PX[b] - PX[a], dy = PY[b] - PY[a], len = Math.hypot(dx, dy) || 1;
+    const nx = -dy / len * (CAR_R * 0.85), ny = dx / len * (CAR_R * 0.85);
+    pts[0] = [pts[0][0] + nx, pts[0][1] + ny];
+    pts[1] = [pts[1][0] - nx, pts[1][1] - ny];
+  }
+  pts.forEach(([x, y], i) => cars[i].setAttribute("transform", `translate(${x.toFixed(1)} ${y.toFixed(1)})`));
+  // The trailing car is drawn last, so it sits on top (the leader is the one you can always find).
+  const trailing = dists[0] < dists[1] ? 0 : 1;
+  if (trailing !== frontCar) { svg.appendChild(cars[trailing]); frontCar = trailing; }
+}
+
+// ---- 4-5. Telemetry traces --------------------------------------------------------
+// Three thin rows on one distance axis: speed, throttle (with brake bands), gap.
+const base = $("tracesBase"), overlay = $("tracesTop");  // "top" is taken: it is the browser's name for the outermost window
+const GUTTER = 74, RIGHT = 14, AXIS_H = 26, ROW_GAP = 12;
+const CORNER_BAND = 16;   // a strip above the speed row for the corner numbers
+const ROWS = [
+  { key: "speed", h: 140, label: "Speed", unit: "km/h" },
+  { key: "pedals", h: 108, label: "Throttle", unit: "% · brake" },
+  { key: "gap", h: 98, label: "Gap", unit: "s" },
+];
+let plotW = 0, rowTop = [], dpr = 1, speedMax = 350, gapMin = -0.1, gapMax = 0.1;
+
+function xOf(d) { return GUTTER + (d / LENGTH) * plotW; }
+function dOf(x) { return Math.min(LENGTH, Math.max(0, ((x - GUTTER) / plotW) * LENGTH)); }
+function ySpeed(v) { return rowTop[0] + 8 + (1 - v / speedMax) * (ROWS[0].h - 8); }
+function yThrottle(v) { return rowTop[1] + 4 + (1 - v / 100) * (ROWS[1].h - 30); }   // leaves room for the brake bands
+function yGap(v) { return rowTop[2] + 6 + (gapMax - v) / (gapMax - gapMin) * (ROWS[2].h - 12); }
+
+function sizeCanvas(c) {
+  // Draw at the screen's real pixel density, so lines stay sharp on high-resolution screens.
+  dpr = window.devicePixelRatio || 1;
+  c.width = Math.round(c.clientWidth * dpr);
+  c.height = Math.round(c.clientHeight * dpr);
+  const ctx = c.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return ctx;
+}
+
+function drawTraces() {
+  const ctx = sizeCanvas(base);
+  sizeCanvas(overlay);
+  const W = base.clientWidth;
+  plotW = W - GUTTER - RIGHT;
+  rowTop = [];
+  let y = CORNER_BAND;
+  for (const r of ROWS) { rowTop.push(y); y += r.h + ROW_GAP; }
+  const bottom = rowTop[2] + ROWS[2].h;
+
+  speedMax = Math.ceil(Math.max(...D.map((d) => Math.max(...d.speedArr))) / 50) * 50;
+  gapMin = Math.min(0, ...DELTA); gapMax = Math.max(0, ...DELTA);
+  const pad = Math.max(0.05, (gapMax - gapMin) * 0.1);
+  gapMin -= pad; gapMax += pad;
+
+  ctx.font = "12px Archivo, system-ui, sans-serif";
+  ctx.textBaseline = "middle";
+
+  // Row labels and faint gridlines.
+  const label = (r, i) => {
+    ctx.fillStyle = "#FAFAFA"; ctx.textAlign = "left";
+    ctx.font = "600 13px Archivo, system-ui, sans-serif";
+    ctx.fillText(r.label, 0, rowTop[i] + 10);
+    ctx.fillStyle = "#8B8F98"; ctx.font = "12px Archivo, system-ui, sans-serif";
+    ctx.fillText(r.unit, 0, rowTop[i] + 26);
+  };
+  ROWS.forEach(label);
+  const grid = (yy, text) => {
+    ctx.strokeStyle = "#232935"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(GUTTER, yy); ctx.lineTo(GUTTER + plotW, yy); ctx.stroke();
+    if (text !== undefined) { ctx.fillStyle = "#8B8F98"; ctx.textAlign = "right"; ctx.fillText(text, GUTTER - 8, yy); }
+  };
+  for (let v = 100; v < speedMax; v += 100) grid(ySpeed(v), v);
+  grid(yThrottle(0), 0); grid(yThrottle(100), 100);
+
+  // Sector boundaries: dashed lines through all three rows, sector names along the bottom.
+  ctx.setLineDash([4, 4]); ctx.strokeStyle = "#5A606B";
+  if (P.sector_ends) for (const d of P.sector_ends) {
+    ctx.beginPath(); ctx.moveTo(xOf(d), 0); ctx.lineTo(xOf(d), bottom); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  // Corner numbers along the top of the speed row (skipped where they'd overlap).
+  ctx.fillStyle = "#8B8F98"; ctx.textAlign = "center"; ctx.font = "600 11px Archivo, system-ui, sans-serif";
+  let lastX = -99;
+  for (const c of P.corners) {
+    const x = xOf(c.distance);
+    if (x - lastX < 26) continue;
+    ctx.fillText(c.label, x, CORNER_BAND / 2);
+    lastX = x;
+  }
+
+  // A line through every grid point (6,000-odd points: drawn once, not every frame).
+  const line = (values, yFn, colour, width) => {
+    ctx.strokeStyle = colour; ctx.lineWidth = width; ctx.lineJoin = "round";
+    ctx.beginPath();
+    for (let i = 0; i < N; i++) {
+      const xx = xOf(i * STEP), yy = yFn(values[i]);
+      if (i === 0) ctx.moveTo(xx, yy); else ctx.lineTo(xx, yy);
+    }
+    ctx.stroke();
+  };
+  // Driver B first, then A on top; each in its own colour.
+  [1, 0].forEach((i) => line(D[i].speed, ySpeed, D[i].colour, 1.75));
+  [1, 0].forEach((i) => line(D[i].throttle, yThrottle, D[i].colour, 1.5));
+
+  // Brake: OpenF1 only says on/off, so it's a band per driver (A above B) where the brake is on.
+  D.forEach((d, i) => {
+    const yy = rowTop[1] + ROWS[1].h - 20 + i * 10;
+    ctx.fillStyle = "#1D222C"; ctx.fillRect(GUTTER, yy, plotW, 7);
+    ctx.fillStyle = d.colour;
+    let start = null;
+    for (let k = 0; k <= N; k++) {
+      const on = k < N && d.brake[k] === 1;
+      if (on && start === null) start = k;
+      if (!on && start !== null) { ctx.fillRect(xOf(start * STEP), yy, Math.max(1, xOf(k * STEP) - xOf(start * STEP)), 7); start = null; }
+    }
+  });
+
+  // Gap: zero line, then the area shaded in the colour of whoever is ahead, then the line itself.
+  const y0 = yGap(0);
+  ctx.strokeStyle = "#5A606B"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(GUTTER, y0); ctx.lineTo(GUTTER + plotW, y0); ctx.stroke();
+  for (const [sign, colour] of [[1, D[0].colour], [-1, D[1].colour]]) {
+    ctx.fillStyle = withAlpha(colour, 0.28);
+    ctx.beginPath(); ctx.moveTo(GUTTER, y0);
+    for (let i = 0; i < N; i++) ctx.lineTo(xOf(i * STEP), yGap(sign > 0 ? Math.max(0, DELTA[i]) : Math.min(0, DELTA[i])));
+    ctx.lineTo(GUTTER + plotW, y0); ctx.closePath(); ctx.fill();
+  }
+  line(DELTA, yGap, "#FAFAFA", 1.5);
+  // Which way is which: written inside the plot's left edge, where the gap is still near zero.
+  ctx.font = "12px Archivo, system-ui, sans-serif"; ctx.textAlign = "left";
+  ctx.fillStyle = D[0].colour; ctx.fillText(`▲ ${D[0].code} ahead`, GUTTER + 6, yGap(gapMax) + 6);
+  ctx.fillStyle = D[1].colour; ctx.fillText(`▼ ${D[1].code} ahead`, GUTTER + 6, yGap(gapMin) - 6);
+  ctx.fillStyle = "#8B8F98"; ctx.textAlign = "right"; ctx.fillText("0", GUTTER - 8, y0);
+
+  // Distance axis: a tick every kilometre.
+  ctx.textAlign = "center"; ctx.fillStyle = "#8B8F98";
+  for (let d = 0; d <= LENGTH; d += 1000) {
+    ctx.fillText(d === 0 ? "0 m" : `${d / 1000} km`, Math.min(xOf(d), GUTTER + plotW - 14), bottom + AXIS_H / 2 + 2);
+  }
+  if (P.sector_ends) {
+    const b = [0, ...P.sector_ends, LENGTH];
+    ctx.fillStyle = "#D5D8DE"; ctx.font = "600 12px Archivo, system-ui, sans-serif";
+    for (let k = 0; k < 3; k++) ctx.fillText(`S${k + 1}`, xOf((b[k] + b[k + 1]) / 2), bottom + AXIS_H / 2 + 2);
+  }
+}
+
+// The top layer: cursor line, a dot on each line at the cursor, and a marker per car on the axis.
+function drawCursor(d, carDists) {
+  const ctx = overlay.getContext("2d");
+  ctx.clearRect(0, 0, overlay.clientWidth, overlay.clientHeight);
+  const bottom = rowTop[2] + ROWS[2].h, x = xOf(d), i = indexAt(d);
+  ctx.strokeStyle = "rgba(250, 250, 250, 0.85)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, bottom); ctx.stroke();
+  const dot = (yy, colour) => {
+    ctx.fillStyle = colour; ctx.strokeStyle = "#0E1117"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(x, yy, 4, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+  };
+  D.forEach((drv) => { dot(ySpeed(drv.speed[i]), drv.colour); dot(yThrottle(drv.throttle[i]), drv.colour); });
+  dot(yGap(DELTA[i]), "#FAFAFA");
+  // Each car's own position: a small triangle under the plot, in its colour.
+  carDists.forEach((cd, k) => {
+    const cx = xOf(cd);
+    ctx.fillStyle = D[k].colour;
+    ctx.beginPath(); ctx.moveTo(cx, bottom + 1); ctx.lineTo(cx - 5, bottom + 9); ctx.lineTo(cx + 5, bottom + 9); ctx.closePath(); ctx.fill();
+  });
+}
+
+// The values at the cursor, written out above the traces.
+let lastReadout = -1;
+function updateReadout(d) {
+  const i = indexAt(d);
+  if (i === lastReadout) return;
+  lastReadout = i;
+  const [a, b] = D;
+  const corner = nearCorner(d);
+  const parts = [
+    ["", `${Math.round(d).toLocaleString("en")} m${corner ? " · near " + corner.label : ""}`],
+    ["Speed", `${Math.round(a.speed[i])} / ${Math.round(b.speed[i])}`],
+    ["Throttle", `${a.throttle[i]} / ${b.throttle[i]}`],
+    ["Brake", `${a.brake[i] ? "on" : "off"} / ${b.brake[i] ? "on" : "off"}`],
+    ["Gear", `${a.gear[i]} / ${b.gear[i]}`],
+    ["RPM", `${a.rpm[i] === null ? "–" : a.rpm[i].toLocaleString("en")} / ${b.rpm[i] === null ? "–" : b.rpm[i].toLocaleString("en")}`],
+    ["Gap", `${signed(DELTA[i])} s`],
+  ];
+  const out = $("readout");
+  out.replaceChildren();
+  parts.forEach(([name, value], k) => {
+    if (k) out.append("   ");
+    if (name) out.append(name + " ");
+    const strong = document.createElement("b");
+    strong.textContent = value;
+    out.append(strong);
+  });
+}
+
+// ---- 6. Controls and the animation loop ----------------------------------------------
+let t = 0;               // replay clock, seconds since both cars crossed the line
+let playing = false;
+let speed = 1;
+let lastNow = null;      // time of the previous animation frame (ms), while playing
+let hoverD = null;       // distance under the mouse (map or traces), or null
+let dirty = true;        // something changed: redraw on the next frame
+
+const scrub = $("scrub");
+scrub.max = Math.round(REPLAY_END * 1000);   // the scrubber works in milliseconds of replay
+
+function setPlaying(on) {
+  if (on && t >= REPLAY_END) t = 0;          // pressing play at the end starts again
+  playing = on;
+  lastNow = null;
+  $("play").textContent = on ? "❚❚ Pause" : "▶ Play";
+  $("play").setAttribute("aria-label", on ? "Pause" : "Play");
+  dirty = true;
+}
+$("play").addEventListener("click", () => setPlaying(!playing));
+$("restart").addEventListener("click", () => { t = 0; setPlaying(true); });
+scrub.addEventListener("input", () => { t = scrub.value / 1000; dirty = true; });
+SPEEDS.forEach((s) => {
+  const b = document.createElement("button");
+  b.textContent = `${s}×`;
+  b.setAttribute("aria-pressed", s === speed);
+  b.addEventListener("click", () => {
+    speed = s;
+    for (const other of $("speeds").children) other.setAttribute("aria-pressed", other === b);
+  });
+  $("speeds").appendChild(b);
+});
+// Space bar plays and pauses (unless a button or the scrubber has focus: they use Space themselves).
+document.addEventListener("keydown", (e) => {
+  if (e.code === "Space" && !["BUTTON", "INPUT"].includes(document.activeElement.tagName)) {
+    e.preventDefault();
+    setPlaying(!playing);
+  }
+});
+
+// Hover a trace: the matching spot lights up on the map (and the cursor follows the mouse).
+overlay.addEventListener("mousemove", (e) => {
+  const x = e.clientX - overlay.getBoundingClientRect().left;
+  hoverD = x >= GUTTER && x <= GUTTER + plotW ? dOf(x) : null;
+  dirty = true;
+});
+overlay.addEventListener("mouseleave", () => { hoverD = null; dirty = true; });
+// Hover the track: the nearest point of the track line (within 28 px) moves the trace cursor there.
+svg.addEventListener("mousemove", (e) => {
+  const r = svg.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+  let best = -1, bestDist = 28;
+  for (let i = 0; i < N; i += 2) {
+    const dd = Math.hypot(PX[i] - mx, PY[i] - my);
+    if (dd < bestDist) { bestDist = dd; best = i; }
+  }
+  hoverD = best >= 0 ? best * STEP : null;
+  dirty = true;
+});
+svg.addEventListener("mouseleave", () => { hoverD = null; dirty = true; });
+
+function updateStatus(dists) {
+  const status = $("status");
+  if (t >= REPLAY_END) {
+    status.className = "status num final";
+    status.textContent = RESULT_TEXT;
+    status.style.color = WINNER === null ? "" : D[WINNER].colour;
+    return;
+  }
+  status.className = "status num";
+  status.style.color = "";
+  if (t === 0) { status.textContent = "Press play (or the space bar) to start the replay"; return; }
+  // Who's ahead, and by how much: the gap where the trailing car is now (the time the leader passed
+  // that point earlier). + = B behind, so A leads.
+  const gap = DELTA[indexAt(Math.min(...dists))];
+  const leader = gap > 0 ? 0 : 1;
+  status.textContent = Math.abs(gap) < 0.0005 ? "Level" : `${D[leader].code} ahead by ${Math.abs(gap).toFixed(3)} s`;
+}
+
+function frame(now) {
+  if (playing) {
+    if (lastNow !== null) t = Math.min(REPLAY_END, t + ((now - lastNow) / 1000) * speed);
+    lastNow = now;
+    if (t >= REPLAY_END) setPlaying(false);   // both cars are on the line: stop there
+    dirty = true;
+  }
+  if (dirty) {
+    dirty = false;
+    const dists = D.map((d) => distanceAt(d, t));
+    placeCars(dists);
+    paintMiniSectors(Math.min(...dists));
+    updateSectors(t);
+    updateStatus(dists);
+    // The cursor follows the mouse while hovering; otherwise the leading car.
+    const cursorD = hoverD !== null ? hoverD : Math.max(...dists);
+    drawCursor(cursorD, dists);
+    updateReadout(cursorD);
+    if (hoverD !== null) {
+      const [x, y] = pointAt(hoverD);
+      hoverRing.setAttribute("cx", x); hoverRing.setAttribute("cy", y); hoverRing.setAttribute("visibility", "visible");
+    } else hoverRing.setAttribute("visibility", "hidden");
+    if (document.activeElement !== scrub) scrub.value = Math.round(t * 1000);
+    $("clock").replaceChildren();
+    const b = document.createElement("b");
+    b.textContent = lapTime(t);
+    $("clock").append(b, ` / ${lapTime(REPLAY_END)}`);
+  }
+  requestAnimationFrame(frame);
+}
+
+// Draw everything, and again whenever the frame's width or the map's height changes. Other height
+// changes are ignored: the readout text can wrap, and redrawing the map for that would be wasted work.
+let laidOutSize = "";
+function layout(force) {
+  const size = `${$("app").clientWidth}x${$("mapWrap").clientHeight}`;
+  if (size === laidOutSize && force !== true) return;
+  laidOutSize = size;
+  layoutMap(); drawTraces(); lastReadout = -1; dirty = true;
+}
+new ResizeObserver(layout).observe($("app"));
+document.fonts.ready.then(() => layout(true));   // redraw once the embedded font has loaded (canvas text uses it)
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

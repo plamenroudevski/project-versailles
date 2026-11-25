@@ -26,7 +26,7 @@ def simulate_lap(speed_at, brake_at=lambda d: False, throttle_at=None, length=10
     d = speed_at(0.0) / 3.6 * first_sample_s
     while d < length + 50:
         rows.append({"Time": t, "Distance": d, "Speed": speed_at(d), "Throttle": throttle_at(d),
-                     "Brake": brake_at(d), "Gear": 8, "X": 10 * d, "Y": 0.0})
+                     "Brake": brake_at(d), "Gear": 8, "RPM": 11000, "X": 10 * d, "Y": 0.0})
         d += speed_at(d) / 3.6 / hz
         t += 1 / hz
     tel = pd.DataFrame(rows)

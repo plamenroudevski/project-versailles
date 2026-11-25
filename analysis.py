@@ -125,7 +125,7 @@ def resample(tel, grid, stretch):
 
     `stretch` scales this lap's distances so both laps have the same length
     (see align_laps).
-    - Time, speed, throttle and position are linearly interpolated between the
+    - Time, speed, throttle, RPM and position are linearly interpolated between the
       two samples either side of each grid point.
     - Brake is on/off. Interpolated, it ramps from 0 to 1 between the last
       "off" and the first "on" sample; BRAKE_ON_LEVEL marks the halfway point.
@@ -135,7 +135,7 @@ def resample(tel, grid, stretch):
     """
     d = tel["Distance"].to_numpy() * stretch
     out = pd.DataFrame({"Distance": grid})
-    for column in ("Time", "Speed", "Throttle", "X", "Y"):
+    for column in ("Time", "Speed", "Throttle", "RPM", "X", "Y"):
         out[column] = np.interp(grid, d, tel[column].to_numpy(dtype=float))
     out["Brake"] = np.interp(grid, d, tel["Brake"].to_numpy(dtype=float)) >= BRAKE_ON_LEVEL
     last_sample = np.clip(np.searchsorted(d, grid, side="right") - 1, 0, len(d) - 1)
@@ -165,7 +165,7 @@ def align_laps(tel_a, lap_time_a, tel_b, lap_time_b):
        starts at 0 and ends at exactly the lap-time difference.
 
     Returns (a, b, delta): both laps on the grid (columns Distance, Time,
-    Speed, Throttle, Brake, Gear, X, Y) and the delta in seconds per grid point.
+    Speed, Throttle, RPM, Brake, Gear, X, Y) and the delta in seconds per grid point.
     """
     own_lengths = [np.interp(lap_time, tel["Time"], tel["Distance"])
                    for tel, lap_time in ((tel_a, lap_time_a), (tel_b, lap_time_b))]

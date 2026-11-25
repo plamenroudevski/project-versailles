@@ -56,7 +56,7 @@ def test_build_telemetry_distance_starts_at_the_line():
     def stamps(seconds):
         return [(start + pd.to_timedelta(s, unit="s")).isoformat() for s in seconds]
 
-    car = pd.DataFrame({"date": stamps(car_s), "speed": 180, "throttle": 100, "brake": 0, "n_gear": 8, "drs": None})
+    car = pd.DataFrame({"date": stamps(car_s), "speed": 180, "throttle": 100, "brake": 0, "n_gear": 8, "rpm": 11000, "drs": None})
     pos = pd.DataFrame({"date": stamps(pos_s), "x": 500 * pos_s, "y": 0.0})
     tel = data.build_telemetry(car, pos, start)
     assert np.interp(0.0, tel["Time"], tel["Distance"]) == pytest.approx(0.0)    # the line is at 0 m
