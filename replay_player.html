@@ -704,6 +704,12 @@ function updateStatus(dists) {
 }
 
 function frame(now) {
+  // Book the next frame FIRST, so the loop keeps running even if something below fails once.
+  // (Booking it at the end meant one error stopped the replay for good: Play then did nothing.)
+  requestAnimationFrame(frame);
+  // The first frame can come before layout() has drawn the map (the browser runs animation
+  // frames before it reports the page's size). Nothing to move yet: wait for the next one.
+  if (!cars.length) return;
   if (playing) {
     if (lastNow !== null) t = Math.min(REPLAY_END, t + ((now - lastNow) / 1000) * speed);
     lastNow = now;
@@ -731,7 +737,6 @@ function frame(now) {
     b.textContent = lapTime(t);
     $("clock").append(b, ` / ${lapTime(REPLAY_END)}`);
   }
-  requestAnimationFrame(frame);
 }
 
 // Draw everything, and again whenever the frame's width or the map's height changes. Other height
