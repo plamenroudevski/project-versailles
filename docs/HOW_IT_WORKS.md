@@ -399,7 +399,7 @@ Each team's time in each area (the time between consecutive metres, counted in t
 
 ### Step 5: the season (`area_gaps`, `efficiency`, `summary_lines`)
 
-Per area: the median over events of the team's time minus the fastest team's (or a rival's), and the counts `lost_n`, `best_n`, `events_n`. Gaps under `LEVEL_S` (0.010 s) are level. The efficiency map divides each speed by the event's best, so circuits compare, and the trail is a running median after each round. The summary leads with the three biggest losses, and only calls an area "strongest" if it isn't also a loss.
+Per area: the median over events of the team's time minus the fastest team's (or a rival's), and the counts `lost_n`, `best_n`, `events_n`. Gaps under `LEVEL_S` (0.010 s) are level. The efficiency map puts downforce against drag. Downforce is each team's medium and fast cornering time as % of the best team in that band (fast weighted 2, medium 1, slow left out because slow corners are mechanical grip); drag is `straight_kmh` as % of the best. Each axis then becomes field units at every event (`field_units`: distance from the field median over 1.4826 × the median absolute deviation, so one broken car can't stretch the scale), and the season position is the running median after each round. efficiency = (x + y) / 2 runs along y = x; setup = (x − y) / 2 runs along y = −x (+ leans high downforce, − leans low drag, under `SETUP_LEVEL` 0.25 is balanced). `efficiency_reading` turns that into the line under the map. The summary leads with the three biggest losses, and only calls an area "strongest" if it isn't also a loss.
 
 ### The offline build (`build_season`)
 
@@ -415,6 +415,7 @@ Per area: the median over events of the team's time minus the fastest team's (or
 - **Linked corners are banded by their slowest point** and flat-out corners count as straight, so 7 of 18 events in 2026 have no fast-corner data (Austin's esses and Shanghai's T7-8 are probably merged with slower corners).
 - **Energy-limited is generous:** it includes cars sitting at their drag-limited top speed, not only cars out of battery.
 - **One lap per team per event,** from whichever driver was faster: a driver's mistake moves the team's numbers.
+- **Low drag and a strong engine look the same on the y axis;** separating them is the diagnosis chain's job. Ferrari's engine deficit shows here as "leans high downforce".
 - **The trail is a running median,** so it only moves once an upgrade has held for about half the season so far.
 - **2026 only:** before 2026 the energy-limited area would mean top speed.
 - **Phones:** the bar chart's labels leave little room for the bars at 375 px (like the tyre page, left for the UI overhaul).

@@ -123,3 +123,28 @@ def test_efficiency_map_one_dot_per_team_and_a_trail():
     assert sum(len(t.x) for t in dots) == 3
     trails = [t for t in fig.data if t.mode and "lines" in t.mode]
     assert len(trails) == 1 and len(trails[0].x) == 3
+
+
+def test_efficiency_map_diagonals_zones_and_equal_axes():
+    fig = charts.efficiency_map_figure(season.efficiency(SEASON_EVENTS), "Bravo")
+    labels = {a.text for a in fig.layout.annotations}
+    assert {"Efficient", "Inefficient", "Low-drag trim", "High-downforce trim"} <= labels
+    assert sum(1 for s in fig.layout.shapes if s.line.dash == "dash") == 2
+    assert fig.layout.yaxis.scaleanchor == "x"
+    assert fig.layout.xaxis.constrain == "domain"  # a square plot, not a stretched x range
+    assert list(fig.layout.xaxis.range) == list(fig.layout.yaxis.range)
+    assert fig.layout.xaxis.range[0] == -fig.layout.xaxis.range[1]
+    assert fig.layout.xaxis.title.text == "Downforce: medium and fast corners (vs field)"
+
+
+def test_efficiency_map_with_no_positions_still_draws():
+    events = SEASON_EVENTS.assign(**{"Cornering · medium": 0.0, "Cornering · fast": 0.0})
+    fig = charts.efficiency_map_figure(season.efficiency(events), "Bravo")
+    assert fig.layout.xaxis.range[1] > 0
+
+
+def test_efficiency_map_range_fits_what_is_drawn():
+    eff = season.efficiency(SEASON_EVENTS)
+    eff.loc[(eff["team"] != "Bravo") & (eff["round"] == eff["round"].min()), ["season_x", "season_y"]] = 50.0
+    fig = charts.efficiency_map_figure(eff, "Bravo")
+    assert fig.layout.xaxis.range[1] < 50  # another team's early round isn't drawn, so it can't set the scale

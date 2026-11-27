@@ -719,28 +719,38 @@ def season_areas_figure(gaps, team_colour, title="", rival=None):
     return fig
 
 
-def efficiency_map_figure(eff, team, title=""):
-    """Season chart 2: fast-corner speed against straight-line speed, both as % of each event's best.
+EFFICIENCY_ZONES = {"Efficient": (1, 1), "Inefficient": (-1, -1),
+                    "Low-drag trim": (-1, 1), "High-downforce trim": (1, -1)}
 
-    One dot per team at its latest season position (median over the events so
-    far). The chosen team's trail shows where it sat after each round, so an
-    upgrade shows up as the trail moving. Top right = quick everywhere.
+
+def efficiency_map_figure(eff, team, title=""):
+    """Season chart 2: downforce (x) against low drag (y), both against the field.
+
+    The median car sits at the centre. Up the y = x diagonal is efficiency (quick
+    in corners and on straights); across y = -x is setup (trading one for the
+    other). One dot per team at its latest season position (median over the
+    events so far); the chosen team's trail shows where it sat after each round,
+    so an upgrade shows up as the trail moving. Equal, square axes keep the
+    diagonals at 45 degrees.
     """
     latest = eff.sort_values("round").groupby("team").tail(1)
     latest = latest[latest["season_x"].notna() & latest["season_y"].notna()]
-    fig = go.Figure()
     trail = eff[eff["team"] == team].sort_values("round")
+    # The scale fits what's drawn: today's dots and the chosen team's trail.
+    values = pd.concat([latest["season_x"], latest["season_y"], trail["season_x"], trail["season_y"]]).abs()
+    edge = max(1.5, 1.15 * values.max()) if values.notna().any() else 1.5
+    fig = go.Figure()
     if len(trail):
         colour = team_colour(trail["team_colour"].iloc[0])
         fig.add_trace(go.Scatter(
             x=trail["season_x"], y=trail["season_y"], mode="lines+markers+text", connectgaps=True,
             # Only the first and last rounds are labelled: late rounds bunch up as the median settles.
             text=[f"R{r}" if i in (0, len(trail) - 1) else "" for i, r in enumerate(trail["round"])],
-            customdata=trail["round"], textposition="top center",
+            customdata=trail[["round", "season_eff", "season_setup"]], textposition="top center",
             textfont=dict(color=MUTED, size=FONT_SIZE - 4), showlegend=False,
             line=dict(color=see_through(colour, 0.5), width=2), marker=dict(color=colour, size=5),
-            hovertemplate=f"<b>{html.escape(team)}</b> after round %{{customdata}}<br>"
-                          "fast corners %{x:.2f} %<br>straights %{y:.2f} %<extra></extra>"))
+            hovertemplate=f"<b>{html.escape(team)}</b> after round %{{customdata[0]}}<br>"
+                          "efficiency %{customdata[1]:+.2f}, setup %{customdata[2]:+.2f}<extra></extra>"))
     for row in latest.itertuples():
         colour = team_colour(row.team_colour)
         chosen = row.team == team
@@ -749,12 +759,28 @@ def efficiency_map_figure(eff, team, title=""):
             textposition="bottom center", showlegend=False,
             textfont=dict(color=TEXT if chosen else MUTED, size=FONT_SIZE - (1 if chosen else 3)),
             marker=dict(color=colour, size=18 if chosen else 12, line=dict(color=TEXT if chosen else colour, width=2)),
-            hovertemplate=f"<b>{html.escape(row.team)}</b><br>fast corners %{{x:.2f}} % of best ({row.x_n} events)<br>"
-                          f"straights %{{y:.2f}} % of best ({row.y_n} events)<extra></extra>"))
+            hovertemplate=f"<b>{html.escape(row.team)}</b><br>"
+                          f"efficiency {row.season_eff:+.2f}, setup {row.season_setup:+.2f}<br>"
+                          f"corners {row.season_x_pct:.2f} % of best ({row.x_n} events)<br>"
+                          f"straights {row.season_y_pct:.2f} % of best ({row.y_n} events)<extra></extra>"))
+    for y_end in (edge, -edge):  # y = x (efficiency) and y = -x (setup), through the median car
+        fig.add_shape(type="line", x0=-edge, y0=-y_end, x1=edge, y1=y_end, layer="below",
+                      line=dict(color=MUTED, width=1, dash="dash"))
+    for text, x, y in (("Efficiency", 0.8, 0.8), ("Setup", 0.8, -0.8)):
+        fig.add_annotation(x=x * edge, y=y * edge, text=text, showarrow=False,
+                           textangle=-45 if y > 0 else 45, yshift=10,
+                           font=dict(color=MUTED, size=FONT_SIZE - 3))
+    inset = 0.95 * edge
+    for text, (sx, sy) in EFFICIENCY_ZONES.items():
+        fig.add_annotation(x=sx * inset, y=sy * inset, text=text, showarrow=False,
+                           xanchor="right" if sx > 0 else "left", yanchor="top" if sy > 0 else "bottom",
+                           font=dict(color=MUTED, size=FONT_SIZE - 2))
     style(fig, title, height=620)
     fig.update_layout(hovermode="closest", margin=dict(t=100 if title else 20))
-    fig.update_xaxes(showgrid=True, gridcolor=GRID, title=dict(text="Fast-corner speed (% of best)", font=dict(size=FONT_SIZE)))
-    fig.update_yaxes(title=dict(text="Straight-line speed (% of best)", font=dict(size=FONT_SIZE)))
+    fig.update_xaxes(showgrid=True, gridcolor=GRID, range=[-edge, edge], zeroline=False, constrain="domain",
+                     title=dict(text="Downforce: medium and fast corners (vs field)", font=dict(size=FONT_SIZE)))
+    fig.update_yaxes(range=[-edge, edge], scaleanchor="x", scaleratio=1, zeroline=False,
+                     title=dict(text="Low drag: straight-line speed (vs field)", font=dict(size=FONT_SIZE)))
     return fig
 
 

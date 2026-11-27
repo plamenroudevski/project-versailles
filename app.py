@@ -594,10 +594,13 @@ def season_page():
                "grey: level (under 0.010 s). The count says in how many events it happened.")
 
     st.markdown("#### Efficiency map")
-    st.plotly_chart(charts.efficiency_map_figure(season.efficiency(events), team), theme=None, config=plotly_config)
+    eff = season.efficiency(events)
+    st.plotly_chart(charts.efficiency_map_figure(eff, team), theme=None, config=plotly_config)
+    st.markdown(f"**{plain(season.efficiency_reading(eff, team))}**")
     st.caption(f"Each dot is a team's season so far; the line is {team}'s position after each round, so an "
-               "upgrade shows as movement. Right = quicker through fast corners, up = quicker on the straights. "
-               "Circuits without a fast corner only count on the straight-line axis.")
+               "upgrade shows as movement. Right = more downforce (quicker through medium and fast corners), "
+               "up = less drag (faster on the straights), both against the field. Up the y = x diagonal is "
+               "efficiency; across the y = -x diagonal is setup.")
 
     st.markdown("#### How these numbers are made")
     st.markdown("\n".join(f"- {plain(line)}" for line in season.METHOD_TEXT))
