@@ -9,7 +9,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import analysis
 import season
+from test_analysis import corner_lap, simulate_lap
 
 
 def trace(speed_at, throttle_at=lambda d: 100.0, brake_at=lambda d: False, length=1000):
@@ -131,3 +133,51 @@ def test_corner_tags_from_markers():
 def test_field_trace_brake_is_majority_vote():
     laps = [lap_with_brake(b) for b in (True, True, False)]
     assert season.field_trace(laps)["Brake"].all()
+
+
+# ---- event_summary ---------------------------------------------------------
+
+def team_table(names):
+    return pd.DataFrame({"team": names, "team_colour": "FFFFFF", "driver": [n[:3].upper() for n in names],
+                         "lap_s": 0.0, "teammate": "", "teammate_s": np.nan})
+
+
+# Three laps with one slow braked corner at 700 m, braking a little later each time.
+LAPS = analysis.align_field([corner_lap(b) for b in (600, 610, 620)])
+PHASES = season.phase_map(season.field_trace(LAPS), None)
+TEAMS = team_table(["Alpha", "Bravo", "Charlie"])
+
+
+def energy_lap(peak_at):
+    """1000 m flat out: up to 320 km/h at `peak_at`, then 10 km/h slower by the line."""
+    def speed_at(d):
+        if d <= peak_at:
+            return 250 + 70 * d / peak_at
+        return 320 - 10 * (d - peak_at) / (1000 - peak_at)
+    return simulate_lap(speed_at)
+
+
+ENERGY_LAPS = analysis.align_field([energy_lap(700), energy_lap(500)])
+ENERGY_PHASES = season.phase_map(season.field_trace(ENERGY_LAPS), None)
+TEAMS_2 = team_table(["Alpha", "Bravo"])
+
+
+def test_areas_sum_to_lap_time():
+    summary = season.event_summary(TEAMS, LAPS, PHASES)
+    totals = summary[season.AREAS].sum(axis=1)
+    np.testing.assert_allclose(totals, [lap["Time"].iloc[-1] - lap["Time"].iloc[0] for lap in LAPS], atol=1e-6)
+
+
+def test_no_fast_corner_gives_nan_not_zero():
+    summary = season.event_summary(TEAMS, LAPS, PHASES)
+    assert summary["fast_corner_kmh"].isna().all()
+
+
+def test_earlier_energy_drop_counts_more_metres():
+    summary = season.event_summary(TEAMS_2, ENERGY_LAPS, ENERGY_PHASES)
+    assert summary.loc[1, "energy_m"] > summary.loc[0, "energy_m"] + 150
+
+
+def test_straight_speed_is_peak_before_drop():
+    summary = season.event_summary(TEAMS_2, ENERGY_LAPS, ENERGY_PHASES)
+    assert summary.loc[0, "straight_kmh"] == pytest.approx(320, abs=1)

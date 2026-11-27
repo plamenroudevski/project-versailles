@@ -30,7 +30,7 @@ import pandas as pd
 
 import analysis
 from analysis import (BRAKE_ON_LEVEL, DEPLOY_DROP_KMH, DEPLOY_FLAT_GAIN_KMH, DEPLOY_MIN_RUN_M,
-                      FULL_THROTTLE_PCT, HIGH_SPEED_MIN_KMH, LOW_SPEED_MAX_KMH)
+                      HIGH_SPEED_MIN_KMH, LOW_SPEED_MAX_KMH)
 
 # =============================================================================
 # CONFIG: every threshold the season breakdown adds, in one place.
@@ -165,3 +165,48 @@ def phase_map(trace, corners):
     area = np.array([f"{p} · {b}" if p in BANDED else p for p, b in zip(phase, bands)], dtype=object)
     return pd.DataFrame({"Distance": d, "Phase": phase, "Band": bands, "Complex": complex_id,
                          "Corner": tags, "Area": area})
+
+
+def straight_runs(phases):
+    """Grid positions [(start, end)] of the field's straights long enough to judge (DEPLOY_MIN_RUN_M)."""
+    d = phases["Distance"].to_numpy()
+    return [(s, e) for s, e in runs(phases["Complex"].to_numpy() == -1) if d[e - 1] - d[s] >= DEPLOY_MIN_RUN_M]
+
+
+def event_summary(teams, laps, phases):
+    """One row per team for one event: the table saved as the event's CSV.
+
+    `teams` has one row per team (team, team_colour, driver, lap_s, teammate,
+    teammate_s), in the same order as `laps` (aligned with align_field);
+    `phases` is phase_map's output for this event. Adds:
+      one column per name in AREAS  seconds spent in that area (0.0 if the
+                                    circuit has none); they add up to the lap
+      fast_corner_kmh  mean speed through "Cornering · fast" (NaN if none)
+      straight_kmh     mean of the lap's top speed on each long straight. The
+                       top is always before any energy drop, so running out of
+                       energy can't pass for drag (NaN if no long straight)
+      energy_m         metres from the lap's own top speed to the end of each
+                       long straight where the speed then falls at least
+                       DEPLOY_DROP_KMH: more metres = the car runs out earlier
+    """
+    area = phases["Area"].to_numpy()
+    fast = area == "Cornering · fast"
+    straights = straight_runs(phases)
+    d = phases["Distance"].to_numpy()
+    rows = []
+    for lap in laps:
+        # Time spent between each metre and the next, counted in the first metre's area.
+        step = np.diff(lap["Time"].to_numpy())
+        speed = lap["Speed"].to_numpy()
+        row = {name: float(step[area[:-1] == name].sum()) for name in AREAS}
+        row["fast_corner_kmh"] = float(speed[fast].mean()) if fast.any() else np.nan
+        tops, energy = [], 0.0
+        for s, e in straights:
+            peak = s + int(np.argmax(speed[s:e]))
+            tops.append(speed[peak])
+            if speed[peak] - speed[e - 1] >= DEPLOY_DROP_KMH:
+                energy += d[e - 1] - d[peak]
+        row["straight_kmh"] = float(np.mean(tops)) if tops else np.nan
+        row["energy_m"] = energy
+        rows.append(row)
+    return pd.concat([teams.reset_index(drop=True), pd.DataFrame(rows)], axis=1)
