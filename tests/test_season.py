@@ -187,14 +187,16 @@ def test_straight_speed_is_peak_before_drop():
 
 # ---- season aggregation and efficiency map -----------------------------------
 
-def make_events(times, fast=None, straight=None, no_area=()):
+def make_events(times, fast=None, straight=None, no_area=(), areas=None):
     """Event rows like load_season returns. `times[round][team]` is the time in
-    every area; `fast`/`straight` give [round][team] speeds (default 250/320)."""
+    every area; `fast`/`straight` give [round][team] speeds (default 250/320);
+    `areas[round][team][area]` overrides one area's time."""
     rows = []
     for rnd, teams in times.items():
         for team, t in teams.items():
             row = {"round": rnd, "event": f"event{rnd}", "team": team, "team_colour": "FFFFFF"}
             row.update({a: (0.0 if a in no_area else t) for a in season.AREAS})
+            row.update((areas or {}).get(rnd, {}).get(team, {}))
             row["fast_corner_kmh"] = (fast or {}).get(rnd, {}).get(team, 250.0)
             row["straight_kmh"] = (straight or {}).get(rnd, {}).get(team, 320.0)
             rows.append(row)
@@ -460,8 +462,9 @@ def test_two_brake_zones_in_one_complex_are_two_corners():
 
 
 def test_efficiency_counts_contributing_events():
-    events = make_events({1: {"Alpha": 1.0, "Bravo": 1.2}, 2: {"Alpha": 1.0, "Bravo": 1.2}},
-                         fast={2: {"Alpha": np.nan, "Bravo": np.nan}})
+    events = pd.concat([make_events({1: {"Alpha": 1.0, "Bravo": 1.2}}),
+                        make_events({2: {"Alpha": 1.0, "Bravo": 1.2}},
+                                    no_area={"Cornering · medium", "Cornering · fast"})], ignore_index=True)
     eff = season.efficiency(events)
     last = eff[eff["round"] == 2].set_index("team")
     assert last.loc["Alpha", "x_n"] == 1 and last.loc["Alpha", "y_n"] == 2
@@ -506,3 +509,55 @@ def test_year_with_no_events_yet(monkeypatch, tmp_path):
     assert season.season_events(2027).empty
     season.build_season(2027, tmp_path)  # must not crash
     assert season.list_seasons(tmp_path) == []
+
+
+# ---- efficiency map: downforce, drag, efficiency and setup ----------------------
+
+THREE = make_events({1: {"Alpha": 1.0, "Bravo": 1.1, "Charlie": 1.2}},
+                    straight={1: {"Alpha": 300.0, "Bravo": 310.0, "Charlie": 320.0}})
+
+
+def test_downforce_fast_counts_double():
+    events = make_events({1: {"Alpha": 1.0, "Bravo": 1.0}},
+                         areas={1: {"Bravo": {"Cornering · fast": 1.25}}})
+    eff = season.efficiency(events).set_index("team")
+    assert eff.loc["Bravo", "x_pct"] == pytest.approx((2 * 80 + 100) / 3)
+    assert eff.loc["Alpha", "x_pct"] == pytest.approx(100)
+
+
+def test_slow_corners_ignored():
+    events = make_events({1: {"Alpha": 1.0, "Bravo": 1.0}},
+                         areas={1: {"Bravo": {"Cornering · slow": 2.0}}})
+    assert (season.efficiency(events)["x_pct"] == 100).all()
+
+
+def test_missing_band_left_out_and_no_bands_is_nan():
+    events = make_events({1: {"Alpha": 1.0, "Bravo": 1.25}}, no_area={"Cornering · fast"})
+    assert season.efficiency(events).set_index("team").loc["Bravo", "x_pct"] == pytest.approx(80)
+    none = make_events({1: {"Alpha": 1.0, "Bravo": 1.2}}, no_area={"Cornering · fast", "Cornering · medium"})
+    eff = season.efficiency(none)
+    assert eff["x_pct"].isna().all() and (eff["x_n"] == 0).all()
+
+
+def test_field_units():
+    units = season.field_units(pd.Series([1.0, 2, 3, 4, 5]), pd.Series([1] * 5))
+    assert units.iloc[2] == 0 and units.iloc[4] == pytest.approx(2 / 1.4826)
+    assert (season.field_units(pd.Series([3.0, 3.0]), pd.Series([1, 1])) == 0).all()
+    assert season.field_units(pd.Series([3.0]), pd.Series([1])).iloc[0] == 0
+
+
+def test_axes_point_the_right_way():
+    eff = season.efficiency(THREE).set_index("team")
+    assert eff.loc["Alpha", "x"] > eff.loc["Charlie", "x"]  # quicker corners -> right
+    assert eff.loc["Charlie", "y"] > eff.loc["Alpha", "y"]  # faster straights -> up
+    assert eff.loc["Alpha", "season_setup"] > 0 > eff.loc["Charlie", "season_setup"]
+    assert eff.loc["Bravo", "season_eff"] == pytest.approx(0)
+
+
+def test_efficiency_reading():
+    eff = season.efficiency(THREE)
+    assert season.efficiency_reading(eff, "Alpha") == "Alpha: efficiency 1st of 3; setup leans high downforce."
+    assert season.efficiency_reading(eff, "Charlie").endswith("setup leans low drag.")
+    assert season.efficiency_reading(eff, "Bravo").endswith("setup balanced.")
+    none = make_events({1: {"Alpha": 1.0}}, no_area={"Cornering · fast", "Cornering · medium"})
+    assert season.efficiency_reading(season.efficiency(none), "Alpha") == "Alpha: not enough events yet."

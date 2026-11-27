@@ -335,24 +335,85 @@ def area_gaps(events, team, rival=None):
     return pd.DataFrame(rows)
 
 
-def efficiency(events):
-    """The efficiency map: each team's corner and straight speed as % of each event's best.
+DOWNFORCE_WEIGHTS = {"Cornering · medium": 1, "Cornering · fast": 2}
+# The downforce axis: medium and fast cornering, fast counting double (the
+# purest aero signal). Slow corners are mechanical grip, so they're left out.
 
-    x_pct, y_pct          this event: fast-corner and straight-line speed, % of the best team
-    season_x, season_y    the team's median up to and including this round: the
-                          trail, which moves as upgrades arrive. NaN rounds (no
-                          fast corner / long straight) are skipped.
-    x_n, y_n              how many events each median rests on so far
+SETUP_LEVEL = 0.25
+# Field spreads: a setup score smaller than this reads "balanced".
+
+MAD_TO_SD = 1.4826
+# Scales the median absolute deviation to match a standard deviation.
+
+
+def field_units(values, rounds):
+    """Each value against its round's field: (value - median) / spread, where the
+    spread is the scaled median absolute deviation (a broken car can't stretch it).
+    A spread of 0 (one team, or all equal) gives 0."""
+    def one_round(v):
+        if v.isna().all():  # no team has this axis at this event
+            return v
+        median = v.median()
+        spread = MAD_TO_SD * (v - median).abs().median()
+        return (v - median) / spread if spread > 0 else (v - median) * 0
+    return values.groupby(rounds).transform(one_round)
+
+
+def efficiency(events):
+    """The efficiency map: downforce against drag, each measured against the field.
+
+    x_pct          this event's downforce: medium and fast cornering time as % of
+                   the best team in each band, weighted DOWNFORCE_WEIGHTS (a band
+                   the event doesn't have is left out; neither = NaN)
+    y_pct          this event's top speed on long straights, % of the best
+    x, y           the same in field units (see field_units): right = more
+                   downforce, up = less drag
+    season_x, season_y, season_x_pct, season_y_pct
+                   the team's median up to and including this round: the trail,
+                   which moves as upgrades arrive. NaN rounds are skipped.
+    x_n, y_n       how many events each median rests on so far
+    season_eff     (season_x + season_y) / 2: along y = x, quick everywhere
+    season_setup   (season_x - season_y) / 2: along y = -x, + leans high
+                   downforce, - leans low drag
     """
     eff = events[["team", "team_colour", "round"]].copy()
-    for column, pct in (("fast_corner_kmh", "x_pct"), ("straight_kmh", "y_pct")):
-        eff[pct] = 100 * events[column] / events.groupby("round")[column].transform("max")
+    weighted, weights = 0.0, 0.0
+    for band, weight in DOWNFORCE_WEIGHTS.items():
+        time = events[band].where(events[band] > 0)
+        pct = 100 * time.groupby(events["round"]).transform("min") / time
+        weighted = weighted + (weight * pct).fillna(0)
+        weights = weights + pct.notna() * weight
+    eff["x_pct"] = weighted / weights.where(weights > 0)
+    eff["y_pct"] = 100 * events["straight_kmh"] / events.groupby("round")["straight_kmh"].transform("max")
+    eff["x"] = field_units(eff["x_pct"], eff["round"])
+    eff["y"] = field_units(eff["y_pct"], eff["round"])
     eff = eff.sort_values(["team", "round"]).reset_index(drop=True)
-    for pct, trail, count in (("x_pct", "season_x", "x_n"), ("y_pct", "season_y", "y_n")):
-        eff[trail] = eff.groupby("team")[pct].transform(lambda s: s.expanding().median())
-        eff[count] = eff.groupby("team")[pct].transform(lambda s: s.notna().cumsum())
+    for column, trail in (("x", "season_x"), ("y", "season_y"), ("x_pct", "season_x_pct"), ("y_pct", "season_y_pct")):
+        eff[trail] = eff.groupby("team")[column].transform(lambda s: s.expanding().median())
+    for column, count in (("x", "x_n"), ("y", "y_n")):
+        eff[count] = eff.groupby("team")[column].transform(lambda s: s.notna().cumsum())
+    eff["season_eff"] = (eff["season_x"] + eff["season_y"]) / 2
+    eff["season_setup"] = (eff["season_x"] - eff["season_y"]) / 2
     return eff
 
+
+def ordinal(n):
+    """1 -> '1st', 2 -> '2nd', 11 -> '11th', 23 -> '23rd'."""
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def efficiency_reading(eff, team):
+    """The line under the map: 'Ferrari: efficiency 4th of 11; setup leans low drag.'"""
+    latest = eff.sort_values("round").groupby("team").tail(1)
+    latest = latest[latest["season_x"].notna() & latest["season_y"].notna()].set_index("team")
+    if team not in latest.index:
+        return f"{team}: not enough events yet."
+    rank = int(latest["season_eff"].rank(ascending=False, method="min")[team])
+    setup = latest.loc[team, "season_setup"]
+    lean = ("balanced" if abs(setup) < SETUP_LEVEL
+            else "leans high downforce" if setup > 0 else "leans low drag")
+    return f"{team}: efficiency {ordinal(rank)} of {len(latest)}; setup {lean}."
 
 
 def area_phrase(area):
@@ -403,9 +464,12 @@ METHOD_TEXT = [
     "events\" says how consistent it is.",
     "Time is counted where it's spent, not where it's caused: a slow exit also slows the next straight, so "
     "part of a traction loss shows up as full throttle. This page shows where the time goes, not why.",
-    "The efficiency map: fast-corner speed against top speed on each long straight, both as % of each event's "
-    "best team, so different circuits compare. Top speed is taken before any energy drop, so running out of "
-    "battery can't pass for drag. The trail is the team's median after each round.",
+    "The efficiency map: downforce is speed through medium and fast corners (fast counts double; slow corners "
+    "are mechanical grip, not aero), drag is the top speed on each long straight, taken before any energy drop. "
+    "Each is measured against the field at every event, in units of how spread out the field is, so the two "
+    "axes compare. Along the y = x diagonal is efficiency (quick in corners and on straights); along y = -x is "
+    "setup (trading one for the other). A strong engine also shows as low drag. The trail is the team's median "
+    "after each round.",
 ]
 
 # =============================================================================
