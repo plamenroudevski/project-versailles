@@ -766,7 +766,7 @@ def efficiency_map_figure(eff, team, title=""):
     for y_end in (edge, -edge):  # y = x (efficiency) and y = -x (setup), through the median car
         fig.add_shape(type="line", x0=-edge, y0=-y_end, x1=edge, y1=y_end, layer="below",
                       line=dict(color=MUTED, width=1, dash="dash"))
-    for text, x, y in (("Efficiency", 0.8, 0.8), ("Setup", 0.8, -0.8)):
+    for text, x, y in (("Efficiency", 0.55, 0.55), ("Setup", 0.55, -0.55)):
         fig.add_annotation(x=x * edge, y=y * edge, text=text, showarrow=False,
                            textangle=-45 if y > 0 else 45, yshift=10,
                            font=dict(color=MUTED, size=FONT_SIZE - 3))

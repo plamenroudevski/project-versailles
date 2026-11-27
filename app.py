@@ -600,7 +600,8 @@ def season_page():
     st.caption(f"Each dot is a team's season so far; the line is {team}'s position after each round, so an "
                "upgrade shows as movement. Right = more downforce (quicker through medium and fast corners), "
                "up = less drag (faster on the straights), both against the field. Up the y = x diagonal is "
-               "efficiency; across the y = -x diagonal is setup.")
+               "efficiency; across the y = -x diagonal is setup. Engine power also shows on the "
+               "up axis, so a slow straight can mean a weak engine rather than drag.")
 
     st.markdown("#### How these numbers are made")
     st.markdown("\n".join(f"- {plain(line)}" for line in season.METHOD_TEXT))

@@ -404,16 +404,24 @@ def ordinal(n):
 
 
 def efficiency_reading(eff, team):
-    """The line under the map: 'Ferrari: efficiency 4th of 11; setup leans low drag.'"""
+    """The line under the map: 'Ferrari: efficiency 4th of 11; setup leans low drag.'
+
+    "Setup leans ..." only when the team is above the field on one axis and below
+    it on the other; a car below (or above) the field on both just reads
+    "stronger in corners than on straights", so a weak car isn't called a trim."""
     latest = eff.sort_values("round").groupby("team").tail(1)
     latest = latest[latest["season_x"].notna() & latest["season_y"].notna()].set_index("team")
     if team not in latest.index:
         return f"{team}: not enough events yet."
     rank = int(latest["season_eff"].rank(ascending=False, method="min")[team])
-    setup = latest.loc[team, "season_setup"]
-    lean = ("balanced" if abs(setup) < SETUP_LEVEL
-            else "leans high downforce" if setup > 0 else "leans low drag")
-    return f"{team}: efficiency {ordinal(rank)} of {len(latest)}; setup {lean}."
+    x, y, setup = latest.loc[team, ["season_x", "season_y", "season_setup"]]
+    if abs(setup) < SETUP_LEVEL:
+        lean = "setup balanced"
+    elif x * y < 0:  # better than the field on one axis, worse on the other: a trim choice
+        lean = "setup leans high downforce" if setup > 0 else "setup leans low drag"
+    else:  # same side of the field on both: a gap, not a trade (a weak engine looks like this)
+        lean = "stronger in corners than on straights" if setup > 0 else "stronger on straights than in corners"
+    return f"{team}: efficiency {ordinal(rank)} of {len(latest)}; {lean}."
 
 
 def area_phrase(area):

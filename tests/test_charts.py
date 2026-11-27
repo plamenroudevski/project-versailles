@@ -148,3 +148,10 @@ def test_efficiency_map_range_fits_what_is_drawn():
     eff.loc[(eff["team"] != "Bravo") & (eff["round"] == eff["round"].min()), ["season_x", "season_y"]] = 50.0
     fig = charts.efficiency_map_figure(eff, "Bravo")
     assert fig.layout.xaxis.range[1] < 50  # another team's early round isn't drawn, so it can't set the scale
+
+
+def test_efficiency_map_diagonal_names_clear_of_zone_labels():
+    fig = charts.efficiency_map_figure(season.efficiency(SEASON_EVENTS), "Bravo")
+    edge = fig.layout.xaxis.range[1]
+    names = [a for a in fig.layout.annotations if a.text in ("Efficiency", "Setup")]
+    assert len(names) == 2 and all(abs(a.x) <= 0.65 * edge for a in names)

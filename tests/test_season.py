@@ -561,3 +561,18 @@ def test_efficiency_reading():
     assert season.efficiency_reading(eff, "Bravo").endswith("setup balanced.")
     none = make_events({1: {"Alpha": 1.0}}, no_area={"Cornering · fast", "Cornering · medium"})
     assert season.efficiency_reading(season.efficiency(none), "Alpha") == "Alpha: not enough events yet."
+
+
+def reading_eff(positions):
+    """A hand-made efficiency table: {team: (season_x, season_y)} at round 1."""
+    rows = [{"team": t, "round": 1, "season_x": x, "season_y": y,
+             "season_eff": (x + y) / 2, "season_setup": (x - y) / 2} for t, (x, y) in positions.items()]
+    return pd.DataFrame(rows)
+
+
+def test_reading_calls_it_a_trim_only_across_the_median():
+    eff = reading_eff({"Trim": (0.8, -0.4), "Weak": (-0.9, -3.3), "Slow": (-1.6, -0.5), "Mid": (0.0, 0.0)})
+    assert season.efficiency_reading(eff, "Trim").endswith("setup leans high downforce.")
+    # Below the field on both axes: a gap between them isn't a trim choice.
+    assert season.efficiency_reading(eff, "Weak").endswith("stronger in corners than on straights.")
+    assert season.efficiency_reading(eff, "Slow").endswith("stronger on straights than in corners.")
