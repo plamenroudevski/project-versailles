@@ -419,7 +419,7 @@ def ferrari_check(year, root=SEASONS_DIR, team="Ferrari"):
     print(f"\n{team} check (gap to the best team per lap, median over events; + = slower):")
     for area in ("Full throttle", "Energy-limited"):
         g = gaps.loc[area]
-        print(f"  {area:15s} {g['gap_s']:+.3f} s   lost in {g['lost_n']} of {g['events_n']} events")
+        print(f"  {area:15s} {g['gap_s']:+.3f} s   lost in {int(g['lost_n'])} of {int(g['events_n'])} events")
     both = events.assign(both=events["Full throttle"] + events["Energy-limited"])
     combined = both.groupby("round").apply(
         lambda e: e.loc[e["team"] == team, "both"].sum() - e["both"].min() if team in set(e["team"]) else np.nan,
