@@ -38,6 +38,7 @@ import analysis
 import data
 from analysis import (BRAKE_ON_LEVEL, DEPLOY_DROP_KMH, DEPLOY_FLAT_GAIN_KMH, DEPLOY_MIN_RUN_M,
                       HIGH_SPEED_MIN_KMH, LOW_SPEED_MAX_KMH)
+from pace import ordinal
 
 # =============================================================================
 # CONFIG: every threshold the season breakdown adds, in one place.
@@ -395,12 +396,6 @@ def efficiency(events):
     eff["season_eff"] = (eff["season_x"] + eff["season_y"]) / 2
     eff["season_setup"] = (eff["season_x"] - eff["season_y"]) / 2
     return eff
-
-
-def ordinal(n):
-    """1 -> '1st', 2 -> '2nd', 11 -> '11th', 23 -> '23rd'."""
-    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
-    return f"{n}{suffix}"
 
 
 def efficiency_reading(eff, team):

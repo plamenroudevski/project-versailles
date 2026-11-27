@@ -56,6 +56,12 @@ CACHE_EXPIRY_S = 600
 # is on disk, use that copy instead of failing. With no copy, errors pass through as before.
 HTTP = requests_cache.CachedSession("openf1", use_temp=True, expire_after=CACHE_EXPIRY_S, stale_if_error=True)
 
+STALE_KEEP_S = 24 * 3600
+# requests-cache never deletes expired answers on its own, so the file would grow
+# for as long as the app runs. Answers older than a day go when data.py loads; a
+# day is plenty for stale_if_error, and freed space is reused, so the file stops growing.
+HTTP.cache.delete(older_than=STALE_KEEP_S)
+
 # Seconds of telemetry fetched either side of a lap. Samples arrive every
 # ~0.25 s and never land exactly on the start/finish line, so the padding
 # gives us samples on both sides of the line to interpolate between.
