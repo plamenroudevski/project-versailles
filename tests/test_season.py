@@ -254,3 +254,98 @@ def test_load_season_reads_round_and_event(tmp_path):
     events, excluded = season.load_season(2026, tmp_path)
     assert events["round"].unique().tolist() == [3] and events["event"].iloc[0] == "suzuka"
     assert excluded.empty and list(excluded.columns) == ["round", "event", "team", "reason"]
+
+
+# ---- build_event / build_season (OpenF1 faked: no internet) --------------------
+
+import data  # noqa: E402
+
+DRIVERS = [("AAA", 1, "Alpha", 630), ("AAB", 2, "Alpha", 620), ("BBA", 3, "Bravo", 610), ("BBB", 4, "Bravo", 600)]  # later braking = faster
+FAKE_LAPS = {number: corner_lap(brake) for _, number, _, brake in DRIVERS}
+MEETING = pd.Series({"round": 1, "meeting_key": 1, "location": "Suzuka"})
+
+
+def fake_data(monkeypatch, rain=False, rain_rounds=(), no_telemetry=()):
+    """Replace data.py's downloads with a tiny two-team event at every meeting."""
+    def list_events(year):
+        return pd.DataFrame({"meeting_key": [3, 2, 1, 0], "meeting_name": ["C GP", "B GP", "A GP", "Pre-Season Testing"],
+                             "location": ["Monza", "Suzuka", "Melbourne", "Sakhir"],
+                             "date_start": ["2026-04-01", "2026-03-15", "2026-03-01", "2026-02-20"]})
+
+    def list_sessions(meeting_key):
+        return pd.DataFrame({"session_key": [meeting_key * 10], "session_name": ["Qualifying"],
+                             "circuit_key": [99], "meeting_key": [meeting_key]})
+
+    def list_drivers(session):
+        return pd.DataFrame({"name_acronym": [d[0] for d in DRIVERS], "driver_number": [d[1] for d in DRIVERS],
+                             "team_name": [d[2] for d in DRIVERS], "team_colour": "FF0000",
+                             "best_lap": [FAKE_LAPS[d[1]][1] for d in DRIVERS]})
+
+    def get_laps(session, driver):
+        number = int(driver["driver_number"])
+        return pd.DataFrame({"driver_number": [number], "lap_number": [5], "lap_duration": [FAKE_LAPS[number][1]],
+                             "deleted": [False]})
+
+    def get_lap_telemetry(session_key, driver_number, lap):
+        acronym = next(d[0] for d in DRIVERS if d[1] == driver_number)
+        if acronym in no_telemetry:
+            raise LookupError("no telemetry")
+        return FAKE_LAPS[driver_number][0]
+
+    def get_corners(year, circuit_key):
+        raise LookupError("no corners")
+
+    monkeypatch.setattr(data, "list_events", list_events)
+    monkeypatch.setattr(data, "list_sessions", list_sessions)
+    monkeypatch.setattr(data, "session_had_rain", lambda key: rain or key // 10 in rain_rounds)
+    monkeypatch.setattr(data, "list_drivers", list_drivers)
+    monkeypatch.setattr(data, "get_laps", get_laps)
+    monkeypatch.setattr(data, "get_lap_telemetry", get_lap_telemetry)
+    monkeypatch.setattr(data, "get_corners", get_corners)
+
+
+def test_season_events_skip_testing_and_number_rounds(monkeypatch):
+    fake_data(monkeypatch)
+    events = season.season_events(2026)
+    assert events["location"].tolist() == ["Melbourne", "Suzuka", "Monza"] and events["round"].tolist() == [1, 2, 3]
+
+
+def test_wet_event_excluded(monkeypatch):
+    fake_data(monkeypatch, rain=True)
+    summary, excluded = season.build_event(2026, MEETING)
+    assert summary is None and excluded == [{"round": 1, "event": "suzuka", "team": "all", "reason": "wet"}]
+
+
+def test_event_summary_has_both_teams(monkeypatch):
+    fake_data(monkeypatch)
+    summary, excluded = season.build_event(2026, MEETING)
+    by_team = summary.set_index("team")
+    assert by_team.loc["Alpha", "driver"] == "AAA" and by_team.loc["Alpha", "teammate"] == "AAB"
+    assert by_team.loc["Bravo", "lap_s"] == pytest.approx(FAKE_LAPS[3][1]) and excluded == []
+
+
+def test_falls_back_to_teammate_telemetry(monkeypatch):
+    fake_data(monkeypatch, no_telemetry={"AAA"})
+    summary, excluded = season.build_event(2026, MEETING)
+    assert summary.set_index("team").loc["Alpha", "driver"] == "AAB" and excluded == []
+
+
+def test_team_excluded_when_no_telemetry(monkeypatch):
+    fake_data(monkeypatch, no_telemetry={"AAA", "AAB"})
+    summary, excluded = season.build_event(2026, MEETING)
+    assert "Alpha" not in set(summary["team"])
+    assert excluded == [{"round": 1, "event": "suzuka", "team": "Alpha", "reason": "no telemetry"}]
+
+
+def test_rerun_skips_existing_and_no_duplicate_exclusions(monkeypatch, tmp_path):
+    fake_data(monkeypatch, rain_rounds={2})
+    season.build_season(2026, tmp_path)
+    assert sorted(p.name for p in (tmp_path / "2026").iterdir()) == ["01_melbourne.csv", "03_monza.csv", "excluded.csv"]
+    calls = []
+    real = season.build_event
+    monkeypatch.setattr(season, "build_event", lambda *a: calls.append(a) or real(*a))
+    season.build_season(2026, tmp_path)
+    assert calls == []
+    assert len(pd.read_csv(tmp_path / "2026" / "excluded.csv")) == 1
+    season.build_season(2026, tmp_path, force=True)
+    assert len(calls) == 3 and len(pd.read_csv(tmp_path / "2026" / "excluded.csv")) == 1

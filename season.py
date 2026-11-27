@@ -26,12 +26,15 @@ Positive = the team is slower (losing time).
 """
 
 import re
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import requests
 
 import analysis
+import data
 from analysis import (BRAKE_ON_LEVEL, DEPLOY_DROP_KMH, DEPLOY_FLAT_GAIN_KMH, DEPLOY_MIN_RUN_M,
                       HIGH_SPEED_MIN_KMH, LOW_SPEED_MAX_KMH)
 
@@ -293,3 +296,138 @@ def efficiency(events):
     for pct, trail in (("x_pct", "season_x"), ("y_pct", "season_y")):
         eff[trail] = eff.groupby("team")[pct].transform(lambda s: s.expanding().median())
     return eff
+
+
+# =============================================================================
+# Downloads: building the season offline (python season.py 2026).
+# =============================================================================
+
+RETRY_REASONS = {"no qualifying session"}
+# Whole-event exclusions worth trying again on the next run: on a race
+# weekend the qualifying session may simply not have happened yet.
+
+
+def season_events(year):
+    """The year's race weekends, oldest first, numbered 1..n (pre-season testing left out)."""
+    meetings = data.list_events(year)
+    meetings = meetings[~meetings["meeting_name"].str.contains("Testing", case=False)]
+    meetings = meetings.sort_values("date_start").reset_index(drop=True)
+    return meetings.assign(round=range(1, len(meetings) + 1))
+
+
+def team_laps(session, drivers):
+    """Each team's lap for the breakdown: (team rows, [(telemetry, lap time)], excluded team reasons).
+
+    The faster driver's best valid lap; if OpenF1 has no telemetry for it,
+    the teammate's best lap instead.
+    """
+    rows, laps, missing = [], [], {}
+    for team, crew in drivers.groupby("team_name", sort=False):
+        crew = crew.sort_values("best_lap")
+        timed = crew[crew["best_lap"].notna()]
+        if timed.empty:
+            missing[team] = "no valid lap"
+            continue
+        for _, driver in timed.iterrows():
+            lap = data.fastest_lap(data.get_laps(session, driver))
+            try:
+                tel = data.get_lap_telemetry(int(session["session_key"]), int(driver["driver_number"]), lap)
+            except LookupError:
+                continue
+            mate = crew[crew["name_acronym"] != driver["name_acronym"]]
+            rows.append({"team": team, "team_colour": driver["team_colour"], "driver": driver["name_acronym"],
+                         "lap_s": float(lap["lap_duration"]),
+                         "teammate": mate["name_acronym"].iloc[0] if len(mate) else "",
+                         "teammate_s": float(mate["best_lap"].iloc[0]) if len(mate) else np.nan})
+            laps.append((tel, float(lap["lap_duration"])))
+            break
+        else:
+            missing[team] = "no telemetry"
+    return pd.DataFrame(rows), laps, missing
+
+
+def build_event(year, meeting):
+    """One event's summary table (None if the whole event is left out) and its exclusions."""
+    event = data.slug(meeting["location"])
+
+    def excluded(team, reason):
+        return {"round": int(meeting["round"]), "event": event, "team": team, "reason": reason}
+
+    sessions = data.list_sessions(int(meeting["meeting_key"]))
+    quali = sessions[sessions["session_name"] == "Qualifying"] if not sessions.empty else sessions
+    if quali.empty:
+        return None, [excluded("all", "no qualifying session")]
+    session = quali.iloc[0]
+    if data.session_had_rain(int(session["session_key"])):
+        return None, [excluded("all", "wet")]
+
+    teams, laps, missing = team_laps(session, data.list_drivers(session))
+    gone = [excluded(team, reason) for team, reason in missing.items()]
+    if teams.empty:
+        return None, gone + [excluded("all", "no telemetry")]
+    try:
+        corners = data.get_corners(year, int(session["circuit_key"]))
+    except LookupError:
+        corners = None
+    aligned = analysis.align_field(laps)
+    return event_summary(teams, aligned, phase_map(field_trace(aligned), corners)), gone
+
+
+def build_season(year, root=SEASONS_DIR, force=False):
+    """Add any new events of `year` to root/<year>/ (every event with force=True).
+
+    Already-built events, and events left out for good (wet, no telemetry),
+    are skipped. A download error skips the event this time; the next run
+    tries it again. Ends with the Ferrari check from the design.
+    """
+    folder = root / str(year)
+    folder.mkdir(parents=True, exist_ok=True)
+    excluded_path = folder / "excluded.csv"
+    excluded = pd.read_csv(excluded_path) if excluded_path.exists() else pd.DataFrame(columns=EXCLUDED_COLUMNS)
+    final = excluded[(excluded["team"] == "all") & ~excluded["reason"].isin(RETRY_REASONS)]["round"]
+    for _, meeting in season_events(year).iterrows():
+        rnd = int(meeting["round"])
+        path = folder / f"{rnd:02d}_{data.slug(meeting['location'])}.csv"
+        if not force and (path.exists() or rnd in set(final)):
+            continue
+        try:
+            summary, gone = build_event(year, meeting)
+        except requests.RequestException as error:
+            print(f"Round {rnd:2d} {meeting['location']}: download failed ({error}); try again later.")
+            continue
+        excluded = pd.concat([excluded[excluded["round"] != rnd], pd.DataFrame(gone, columns=EXCLUDED_COLUMNS)],
+                             ignore_index=True)
+        excluded.sort_values(["round", "team"]).to_csv(excluded_path, index=False)
+        if summary is None:
+            path.unlink(missing_ok=True)
+            print(f"Round {rnd:2d} {meeting['location']}: left out ({gone[-1]['reason']}).")
+            continue
+        summary.to_csv(path, index=False, float_format="%.4f")
+        note = f", left out: {', '.join(g['team'] + ' (' + g['reason'] + ')' for g in gone)}" if gone else ""
+        print(f"Round {rnd:2d} {meeting['location']}: {len(summary)} teams{note}.")
+    ferrari_check(year, root)
+
+
+def ferrari_check(year, root=SEASONS_DIR, team="Ferrari"):
+    """Print the design's sanity check: Ferrari's power-unit deficit is public, so it
+    should lose time at full throttle. Printed for review, never a pass/fail gate."""
+    events, _ = load_season(year, root)
+    if events.empty or team not in set(events["team"]):
+        print(f"{team} check: no {team} laps saved yet.")
+        return
+    gaps = area_gaps(events, team).set_index("area")
+    print(f"\n{team} check (gap to the best team per lap, median over events; + = slower):")
+    for area in ("Full throttle", "Energy-limited"):
+        g = gaps.loc[area]
+        print(f"  {area:15s} {g['gap_s']:+.3f} s   lost in {g['lost_n']} of {g['events_n']} events")
+    both = events.assign(both=events["Full throttle"] + events["Energy-limited"])
+    combined = both.groupby("round").apply(
+        lambda e: e.loc[e["team"] == team, "both"].sum() - e["both"].min() if team in set(e["team"]) else np.nan,
+        include_groups=False).dropna()
+    print(f"  {'Both together':15s} {combined.median():+.3f} s   lost in {(combined > LEVEL_S).sum()} of {len(combined)} events")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2 or not sys.argv[1].isdigit():
+        sys.exit("Usage: python season.py 2026 [--force]")
+    build_season(int(sys.argv[1]), force="--force" in sys.argv)
