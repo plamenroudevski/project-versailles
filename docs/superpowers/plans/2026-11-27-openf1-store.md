@@ -22,7 +22,7 @@
 - Writes are atomic (write `*.tmp`, then `os.replace`), and the manifest is saved after every session.
 - Commits: `git commit -F <file>`, message ends with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Work on branch `openf1-store`. Never push without the owner's yes.
 - **OpenF1 is locked during live sessions** (Lusail weekend 2026-11-27..29): Tasks 1-3 use fakes only. Task 4 (first real build) waits until `curl -s -o /dev/null -w "%{http_code}" "https://api.openf1.org/v1/meetings?year=2026"` returns 200.
-- **Stop point:** after Task 4, stop and review the first real build with the owner before the long backfill (Task 7).
+- **Stop point:** after Task 4, stop and review the first real build with the owner before the long backfill (Task 6).
 
 ## Review Focus
 
