@@ -372,6 +372,53 @@ São Paulo: 641 of 1,437 laps kept (459 on inters, 182 in traffic). Las Vegas: 2
 - **Brake is on/off,** as everywhere in this app.
 - **Not live:** it replays finished laps. Live timing is out of scope.
 
+## 12. Season breakdown (`season.py`)
+
+### The 30-second version
+
+> "For every 2026 qualifying, I take each team's best lap, put all 11 on one distance grid, and use the field's median lap to label every metre: braking, cornering, traction, lift and coast, full throttle, or energy-limited, with corners banded slow, medium or fast. Each team's lap then splits into 12 area times that add up to its lap time. Over the season I take the median gap to the best team in each area, with how often it happened. That shows *where* a car loses time; *why* is the next project. Ferrari's known power deficit came out on its own: its biggest losses are at full throttle and when energy runs out."
+
+### Step 1: the field on one grid (`analysis.align_field`)
+
+`align_laps` already stretched two laps to their average length so the same corner sits at the same metre. `align_field` does it for any number of laps, and `align_laps` now calls it (the two-lap result is unchanged, and a test checks that).
+
+### Step 2: the field's typical lap (`field_trace`)
+
+At every metre: the median speed, throttle and position of the 11 laps, and a brake vote (braking where at least half brake). The median means one odd lap can't move the map.
+
+### Step 3: the phase map (`phase_map`)
+
+- A **corner complex** is any stretch where the field is off full throttle. Complexes less than `MIN_FULL_GAP_M` (50 m) apart are joined (a chicane is one complex); dips shorter than `MIN_COMPLEX_M` (20 m) are sensor wobble.
+- Inside a complex: **lift & coast** before the brake, **braking**, **cornering** from brake release (or from the lift, if there's no braking) to where the throttle reaches `TRACTION_START_PCT` (10 %) after the slowest point, then **traction** until full throttle.
+- **Band** (`band`): slow under 120 km/h, fast from 200 km/h (analysis.py's bands). Within `BAND_LEEWAY_KMH` (30) of an edge, braking decides, from Flow Racers' braking-based corner types: a corner needing at most `MINIMAL_BRAKING_M` (30 m, a tap) is fast; one slowed for by `HEAVY_DROP_KMH` (150) or more is slow.
+- On straights of at least 300 m, `analysis.straight_metrics` judges the field's speed: if it **drops** after its peak, the part after the peak is **energy-limited**; if it **flattens**, the level part at the end is.
+
+### Step 4: one row per team (`event_summary`)
+
+Each team's time in each area (the time between consecutive metres, counted in the first metre's area, so the 12 add up to the lap), plus three numbers for the efficiency map and for the next project: `fast_corner_kmh` (mean speed through fast cornering), `straight_kmh` (the top speed on each long straight, which always comes before any energy drop) and `energy_m` (metres from the car's own peak to the end of straights where its speed then drops: more metres = it runs out earlier than the field).
+
+### Step 5: the season (`area_gaps`, `efficiency`, `summary_lines`)
+
+Per area: the median over events of the team's time minus the fastest team's (or a rival's), and the counts `lost_n`, `best_n`, `events_n`. Gaps under `LEVEL_S` (0.010 s) are level. The efficiency map divides each speed by the event's best, so circuits compare, and the trail is a running median after each round. The summary leads with the three biggest losses, and only calls an area "strongest" if it isn't also a loss.
+
+### The offline build (`build_season`)
+
+`python season.py 2026` walks the season's race weekends (testing skipped), skips events already saved, and writes `seasons/2026/<round>_<city>.csv` plus `excluded.csv`. Wet sessions and teams without telemetry are left out for good; a missing qualifying session (the weekend may still be running) and download errors are retried next time. If the faster driver's lap has no telemetry, the teammate's lap is used. It ends with the Ferrari check. The page never downloads anything, and doesn't cache the files either: a cached copy could outlive a push that adds a race (the 25 Nov RPM lesson in section 11).
+
+### Tests
+
+`tests/test_season.py` (made-up laps): phases come out in the right order for a braked corner; a lift-only corner is a complex with no lift & coast; a speed drop is energy-limited; a 10 m throttle wobble isn't a corner; band leeway cases (Suzuka esses fast, real braking medium); areas add up to the lap time; NaN, not 0, when a circuit has no fast corner; the best team's gap is 0; a level gap isn't counted as lost; an upgrade moves the trail; all-digit team colours stay text; wet events, teammate fallback and re-runs without duplicates (with OpenF1 faked). `tests/test_charts.py` checks both figures.
+
+### Honest weaknesses of the season breakdown
+
+- **Where, not why:** time is counted where it's spent. A poor exit also slows the next straight, and arriving slower at a corner shortens braking, so Ferrari "gains" 0.35 s in slow-corner braking against Mercedes partly *because* it's slower on the straights.
+- **Linked corners are banded by their slowest point** and flat-out corners count as straight, so 7 of 18 events in 2026 have no fast-corner data (Austin's esses and Shanghai's T7-8 are probably merged with slower corners).
+- **Energy-limited is generous:** it includes cars sitting at their drag-limited top speed, not only cars out of battery.
+- **One lap per team per event,** from whichever driver was faster: a driver's mistake moves the team's numbers.
+- **The trail is a running median,** so it only moves once an upgrade has held for about half the season so far.
+- **2026 only:** before 2026 the energy-limited area would mean top speed.
+- **Phones:** the bar chart's labels leave little room for the bars at 375 px (like the tyre page, left for the UI overhaul).
+
 ## Honest weaknesses (say these before they're asked)
 
 - **One lap, wet session:** the thresholds were tuned on it, and dry running may need different values.

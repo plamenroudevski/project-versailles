@@ -20,6 +20,9 @@ Three pages, listed at the top of the sidebar:
   sensitivity and the full tables.
 - Lap replay: the same pickers as Qualifying, then both laps replayed side
   by side on the track map with synced telemetry (replay.py builds it).
+- Season: where one team loses or gains lap time across a season, against
+  the best team in each area or a rival, plus the efficiency map. Reads the
+  files season.py saves in seasons/<year>/: no downloads.
 - Driver laps (not in the sidebar): every lap of one driver's race with
   sector times, opened by clicking a driver's name on the Race pace page.
 
@@ -54,6 +57,7 @@ import charts
 import data
 import pace
 import replay
+import season
 import tyres
 
 CACHE_TTL_S = 600
@@ -549,6 +553,70 @@ def tyres_page():
         st.dataframe(pd.Series(counts["dropped"], name="Laps").rename_axis("Reason").reset_index(), hide_index=True)
 
 
+# ---- Page 6: Season --------------------------------------------------------------------
+
+COMPARE = ["Best in each area", "A rival"]
+
+
+def season_page():
+    """Where one team's lap time goes across a season, and what kind of car it is.
+
+    Reads only seasons/<year>/ (built offline by `python season.py 2026` after
+    each race and pushed), so it never waits on OpenF1. The files are tiny, so
+    they're read fresh each run rather than cached: a cached copy could outlive
+    a push that adds a race.
+    """
+    st.sidebar.header("Season")
+    years = season.list_seasons()
+    if not years:
+        stop("No season data yet.")
+    year = st.sidebar.selectbox("Year", years)
+    events, excluded = season.load_season(year)
+    teams = sorted(events["team"].unique())
+    team = st.sidebar.selectbox("Team", teams, index=teams.index("Ferrari") if "Ferrari" in teams else 0)
+    mode = st.sidebar.segmented_control("Compare to", COMPARE, default=COMPARE[0], required=True)
+    rival = st.sidebar.selectbox("Rival", [t for t in teams if t != team]) if mode == COMPARE[1] else None
+    rounds = events["round"].nunique()
+    st.sidebar.caption(f"Best dry qualifying laps from {rounds} events. Updated after each race weekend. "
+                       "Data: OpenF1.")
+
+    gaps = season.area_gaps(events, team, rival)
+    colour = charts.team_colour(events.loc[events["team"] == team, "team_colour"].iloc[0])
+    st.subheader(f"{year} season: {team} vs {rival or 'the best team in each area'}")
+
+    st.markdown("#### Summary")
+    st.markdown("\n".join(f"- {plain(line)}" for line in season.summary_lines(gaps, rival)))
+
+    plotly_config = {"displaylogo": False}
+    st.markdown("#### Where the lap time goes")
+    st.plotly_chart(charts.season_areas_figure(gaps, colour, rival=rival), theme=None, config=plotly_config)
+    st.caption("Median gap per lap over the season, by area. Filled bars: time lost; hollow bars: time gained; "
+               "grey: level (under 0.010 s). The count says in how many events it happened.")
+
+    st.markdown("#### Efficiency map")
+    st.plotly_chart(charts.efficiency_map_figure(season.efficiency(events), team), theme=None, config=plotly_config)
+    st.caption(f"Each dot is a team's season so far; the line is {team}'s position after each round, so an "
+               "upgrade shows as movement. Right = quicker through fast corners, up = quicker on the straights. "
+               "Circuits without a fast corner only count on the straight-line axis.")
+
+    st.markdown("#### How these numbers are made")
+    st.markdown("\n".join(f"- {plain(line)}" for line in season.METHOD_TEXT))
+
+    st.markdown("#### Events left out")
+    if excluded.empty:
+        st.markdown("None.")
+    else:
+        st.dataframe(pd.DataFrame({"Round": excluded["round"], "Event": excluded["event"].str.replace("_", " ").str.title(),
+                                   "Team": excluded["team"].replace("all", "Whole event"),
+                                   "Reason": excluded["reason"]}), hide_index=True)
+
+    with st.expander("Every event, every team (seconds in each area)"):
+        table = events[["round", "event", "team", "driver", "lap_s", *season.AREAS, "fast_corner_kmh",
+                        "straight_kmh", "energy_m"]].sort_values(["round", "lap_s"])
+        st.dataframe(table, hide_index=True, column_config={
+            c: st.column_config.NumberColumn(format="%.3f") for c in ("lap_s", *season.AREAS)})
+
+
 # ---- Page 5: Lap replay -----------------------------------------------------------------
 
 def replay_page():
@@ -581,5 +649,6 @@ st.navigation([
     st.Page(race_pace_page, title="Race pace", icon=":material/leaderboard:", url_path="race-pace"),
     st.Page(tyres_page, title="Tyre degradation", icon=":material/tire_repair:", url_path="tyres"),
     st.Page(replay_page, title="Lap replay", icon=":material/play_circle:", url_path="replay"),
+    st.Page(season_page, title="Season", icon=":material/insights:", url_path="season"),
     st.Page(driver_laps_page, title="Driver laps", icon=":material/table:", url_path="driver", visibility="hidden"),
 ]).run()

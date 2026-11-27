@@ -325,6 +325,60 @@ def efficiency(events):
     return eff
 
 
+
+def area_phrase(area):
+    """'Traction · slow' -> 'in slow-corner traction', 'Full throttle' -> 'at full throttle'."""
+    if " · " in area:
+        phase, speed = area.split(" · ")
+        return f"in {speed}-corner {phase.lower()}"
+    return {"Full throttle": "at full throttle", "Energy-limited": "when the battery runs out on straights",
+            "Lift & coast": "in lift & coast"}[area]
+
+
+def summary_lines(gaps, rival=None, most=3):
+    """The page's answer-first summary: the biggest losses, then the strongest areas.
+
+    Only gaps beyond LEVEL_S count. Each line carries its consistency
+    ("in 16 of 18 events"), so a one-off can't pass for a pattern.
+    """
+    counted = gaps[gaps["events_n"] > 0]
+    losses = counted[counted["gap_s"] > LEVEL_S].sort_values("gap_s", ascending=False).head(most)
+    lines = [f"Loses {g.gap_s:.3f} s per lap {area_phrase(g.area)} (slower in {g.lost_n} of {g.events_n} events)."
+             for g in losses.itertuples()]
+    if rival:
+        gains = counted[counted["gap_s"] < -LEVEL_S].sort_values("gap_s").head(most)
+        lines += [f"Gains {-g.gap_s:.3f} s per lap on {rival} {area_phrase(g.area)} "
+                  f"(faster in {g.best_n} of {g.events_n} events)." for g in gains.itertuples()]
+        if not lines:
+            lines = [f"Level with {rival} in every area (within {LEVEL_S:.3f} s per lap)."]
+    else:
+        # The smallest gap among areas that aren't losses, so a loss is never also called a strength.
+        best = counted[counted["gap_s"] <= LEVEL_S].sort_values(["gap_s", "best_n"], ascending=[True, False]).head(1)
+        lines += [f"Strongest {area_phrase(g.area)}: the best team there in {g.best_n} of {g.events_n} events."
+                  for g in best.itertuples() if g.best_n > 0]
+    return lines
+
+
+METHOD_TEXT = [
+    "Each team's best dry lap from main qualifying at every event (low fuel, new tyres: the fairest car-to-car "
+    "comparison), whichever of its two drivers set it. Wet sessions are left out and listed below.",
+    "All 11 laps are put on one distance grid. The field's median lap then labels every metre: braking, "
+    "cornering, traction (throttle coming back after the slowest point), lift & coast (off the throttle "
+    "before the brake), full throttle, or energy-limited (flat out but the speed levels off or drops, as 2026 "
+    "cars run out of battery energy). Every team is measured on that same map.",
+    "Corners are slow under 120 km/h and fast from 200 km/h at their slowest point. Near those edges braking "
+    "decides (Flow Racers' corner types): a corner from 170 km/h that needs at most a brake tap is fast, and "
+    "one under 150 km/h that the field slows down for by 150 km/h or more is slow. Corners taken completely "
+    "flat count as full throttle.",
+    "Gaps are the median over the season. A gap under 0.010 s per lap counts as level. \"Lost in 16 of 18 "
+    "events\" says how consistent it is.",
+    "Time is counted where it's spent, not where it's caused: a slow exit also slows the next straight, so "
+    "part of a traction loss shows up as full throttle. This page shows where the time goes, not why.",
+    "The efficiency map: fast-corner speed against top speed on each long straight, both as % of each event's "
+    "best team, so different circuits compare. Top speed is taken before any energy drop, so running out of "
+    "battery can't pass for drag. The trail is the team's median after each round.",
+]
+
 # =============================================================================
 # Downloads: building the season offline (python season.py 2026).
 # =============================================================================

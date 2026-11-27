@@ -1,6 +1,6 @@
-# Project Versailles: F1 qualifying telemetry, race pace, tyre degradation and lap replay
+# Project Versailles: F1 qualifying telemetry, race pace, tyre degradation, lap replay and season breakdown
 
-Compares two drivers' qualifying laps from real F1 telemetry and shows **where** one gains or loses time and the **likely reason**, corner by corner. A second page, **Race pace**, ranks every driver in a race by their median lap time over clean racing laps: who was actually fastest, as opposed to who finished where ([method below](#race-pace-method)). A third, **Tyre degradation**, estimates how much lap time each car lost per lap of tyre age, per compound ([method below](#tyre-degradation-method)). A fourth, **Lap replay**, replays two drivers' laps together on a large track map, like a live-timing screen, with the telemetry synced underneath ([how it works below](#lap-replay)).
+Compares two drivers' qualifying laps from real F1 telemetry and shows **where** one gains or loses time and the **likely reason**, corner by corner. A second page, **Race pace**, ranks every driver in a race by their median lap time over clean racing laps: who was actually fastest, as opposed to who finished where ([method below](#race-pace-method)). A third, **Tyre degradation**, estimates how much lap time each car lost per lap of tyre age, per compound ([method below](#tyre-degradation-method)). A fourth, **Lap replay**, replays two drivers' laps together on a large track map, like a live-timing screen, with the telemetry synced underneath ([how it works below](#lap-replay)). A fifth, **Season**, shows where one team's lap time goes across a whole season, area by area, and what kind of car it is ([method below](#season-breakdown)).
 
 **Live app: https://project-versailles.streamlit.app/** (any session from 2023 onwards; the app sleeps when unused, so the first visit can take a minute)
 
@@ -111,6 +111,30 @@ Answers one question: **which part of the track is this bit of telemetry about?*
 
 Times come straight from OpenF1: the payload's lap and sector times match the official ones to the millisecond (checked on 2026 Las Vegas qualifying and race). The car-number font is Archivo (SIL Open Font License, in `assets/fonts/`); see `assets/README.md` to swap in a licensed team font.
 
+## Season breakdown
+
+Answers one question: **across a season, where on the lap does one team lose or gain time against the best team in each area (or a rival), and how consistently?** It's the first step of a bigger aim: from *where* a car loses time, to *why*, to *what to change*.
+
+![The Season page: Ferrari's 2026 gaps by area and the efficiency map](docs/season.png)
+
+- **Laps:** each team's best dry lap from main qualifying at every event (wet sessions are left out and listed on the page).
+- **One map for the whole field:** all 11 laps go on one distance grid (`analysis.align_field`), and the field's median lap labels every metre (`season.phase_map`): **braking**, **cornering**, **traction** (throttle coming back after the slowest point), **lift & coast** (off the throttle before the brake), **full throttle**, or **energy-limited** (flat out while the speed levels off or drops, as 2026 cars run out of battery energy).
+- **Corner bands:** slow under 120 km/h and fast from 200 km/h at the slowest point. Near those edges braking decides, following [Flow Racers' F1 corner types](https://flowracers.com/blog/f1-corner-types/): from 170 km/h, a corner needing at most a brake tap is fast; under 150 km/h, one the field slows down for by 150 km/h or more is slow.
+- **12 areas** (braking, cornering and traction × slow/medium/fast, plus lift & coast, full throttle, energy-limited). A team's area times add up to its lap time.
+- **Season numbers:** the median gap per lap in each area, with how many events it happened in ("lost in 16 of 18"). Gaps under 0.010 s count as level.
+- **Efficiency map:** fast-corner speed against straight-line speed, both as % of each event's best team, with the chosen team's trail after each round so upgrades show as movement. Top speed is taken before any energy drop, so running out of battery can't pass for drag.
+
+**Not live.** A season is about 1,000 OpenF1 requests (30-40 minutes), so it's built offline and saved as small CSV files in `seasons/<year>/`; the page only reads them. After each race weekend:
+
+```bash
+python season.py 2026                  # adds any new events (--force rebuilds them all)
+python charts.py 2026 season Ferrari   # optional: the two charts as HTML in output/
+```
+
+Check the printed summary, then commit and push `seasons/`.
+
+**First check:** Ferrari's power-unit deficit is public (the FIA granted it extra development under ADUO). Without being told, the 2026 breakdown finds Ferrari losing 0.42 s per lap at full throttle and 0.17 s when energy runs out against Mercedes, in 14 and 12 of 18 events.
+
 ## Limitations
 
 - **One lap proves nothing on its own.** Findings describe *this* lap; traffic, tyre preparation or a mistake can dominate.
@@ -120,6 +144,7 @@ Times come straight from OpenF1: the payload's lap and sector times match the of
 - **Corner positions are approximate** (MultiViewer), and thresholds were tuned on a wet session. Expect to revisit them for dry running.
 - **Data coverage:** 2023 onwards (OpenF1). F1's own live-timing archive now requires an F1 TV subscription, which is why FastF1's session loader isn't used for telemetry.
 - **Lap replay positions** are drawn on one track line (the faster lap's), so the two cars' racing lines aren't shown, only where each car was along the lap. Sector lines are placed from the faster lap's sector times, since OpenF1 doesn't give their positions.
+- **Season breakdown:** time is counted where it's spent, not where it's caused (a slow exit also slows the next straight), so it shows *where*, not *why*. 2026 only: before 2026, speed levelling off at full throttle means top speed, not energy. Corners taken completely flat count as full throttle, and linked corners are banded by their slowest point, so some circuits (7 of 18 in 2026) have no fast-corner data. "Energy-limited" also includes straights where cars simply sit at top speed. The bar chart is cramped on phones.
 - **Rate limits.** OpenF1's free tier allows 30 requests a minute, shared by every visitor of the hosted app. Responses are cached for 10 minutes and rate-limited requests are retried.
 
 ## Run it locally
@@ -147,11 +172,13 @@ Terminal tools: `python analysis.py` (zone table and findings), `python charts.p
 | [`analysis.py`](analysis.py) | The qualifying analysis engine: pure functions, runnable from a script |
 | [`pace.py`](pace.py) | The race pace engine: pure functions on a plain lap table, runnable from a script |
 | [`tyres.py`](tyres.py) | The tyre degradation model: pure functions on a plain lap table, runnable from a script |
+| [`season.py`](season.py) | The season breakdown: phase map, area times, season gaps, efficiency map, and the offline build (`python season.py 2026`) |
+| [`seasons/`](seasons) | The saved season: one small CSV per event, plus the events left out |
 | [`replay.py`](replay.py) | The lap replay's data: one JSON payload (laps on a 1 m grid, sectors, corners, rotated map) poured into the player |
 | [`replay_player.html`](replay_player.html) | The lap replay player: SVG map, canvas traces and the animation loop, in one self-contained file |
 | [`assets/`](assets) | Files the player embeds: the car-number font and its licence |
 | [`charts.py`](charts.py) | Plotly figures, the race pace timing tower (HTML) and the tyre charts |
-| [`app.py`](app.py) | Streamlit user interface only: the Qualifying, Race pace, Tyre degradation and Lap replay pages |
+| [`app.py`](app.py) | Streamlit user interface only: the Qualifying, Race pace, Tyre degradation, Lap replay and Season pages |
 | [`check_session.py`](check_session.py) | Reports which telemetry channels a session actually has |
 | [`tests/`](tests) | pytest, using made-up laps with hand-checked answers |
 

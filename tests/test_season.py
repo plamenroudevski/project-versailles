@@ -380,3 +380,37 @@ def test_load_season_keeps_all_digit_team_colours_as_text(tmp_path):
         tmp_path / "2026" / "01_melbourne.csv", index=False)
     events, _ = season.load_season(2026, tmp_path)
     assert events["team_colour"].iloc[0] == "229971"
+
+
+# ---- summary lines for the page ------------------------------------------------
+
+def test_summary_leads_with_the_biggest_loss():
+    events = make_events({1: {"Alpha": 1.0, "Bravo": 1.2}, 2: {"Alpha": 1.0, "Bravo": 1.2}})
+    events.loc[events["team"] == "Bravo", "Full throttle"] = 1.6
+    lines = season.summary_lines(season.area_gaps(events, "Bravo"))
+    assert lines[0].startswith("Loses 0.600 s per lap at full throttle") and "2 of 2 events" in lines[0]
+    assert len([line for line in lines if line.startswith("Loses")]) == 3
+
+
+def test_summary_against_a_rival_lists_gains():
+    events = make_events({1: {"Alpha": 1.0, "Bravo": 1.2}})
+    lines = season.summary_lines(season.area_gaps(events, "Alpha", rival="Bravo"), rival="Bravo")
+    assert any(line.startswith("Gains 0.200 s per lap") and "on Bravo" in line for line in lines)
+
+
+def test_summary_when_level_everywhere():
+    events = make_events({1: {"Alpha": 1.0, "Bravo": 1.0}})
+    assert season.summary_lines(season.area_gaps(events, "Alpha", rival="Bravo"), rival="Bravo") == [
+        "Level with Bravo in every area (within 0.010 s per lap)."]
+
+
+def test_summary_strongest_area_is_not_also_a_loss():
+    # Full throttle: Alpha best in 2 of 5 but 0.3 s slower in the other 3 (a loss).
+    # Lift & coast: best once, level otherwise. Strongest must be lift & coast.
+    events = make_events({r: {"Alpha": 1.3, "Bravo": 1.2} for r in range(1, 6)})
+    alpha = events["team"] == "Alpha"
+    events.loc[alpha, "Full throttle"] = [1.0, 1.0, 1.5, 1.5, 1.5]
+    events.loc[alpha, "Lift & coast"] = [1.0, 1.205, 1.205, 1.205, 1.205]
+    lines = season.summary_lines(season.area_gaps(events, "Alpha"))
+    assert [line for line in lines if line.startswith("Strongest")] == [
+        "Strongest in lift & coast: the best team there in 1 of 5 events."]

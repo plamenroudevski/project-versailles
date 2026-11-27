@@ -712,7 +712,7 @@ def season_areas_figure(gaps, team_colour, title="", rival=None):
         hovertemplate="<b>%{y}</b><br>%{text}<extra></extra>"))
     style(fig, title, height=160 + 40 * len(gaps))
     against = f"vs {html.escape(rival)}" if rival else "vs the best team in each area"
-    fig.update_layout(margin=dict(l=170, r=170), bargap=0.35)
+    fig.update_layout(margin=dict(l=170, r=170, t=100 if title else 20), bargap=0.35)  # no title: no empty band on top
     fig.update_xaxes(zeroline=True, zerolinecolor=MUTED,
                      title=dict(text=f"Time lost per lap {against} (s) · + = slower", font=dict(size=FONT_SIZE)))
     fig.update_yaxes(autorange="reversed", showgrid=False)  # first area at the top
@@ -752,7 +752,7 @@ def efficiency_map_figure(eff, team, title=""):
             hovertemplate=f"<b>{html.escape(row.team)}</b><br>fast corners %{{x:.2f}} % of best<br>"
                           "straights %{y:.2f} % of best<extra></extra>"))
     style(fig, title, height=620)
-    fig.update_layout(hovermode="closest")
+    fig.update_layout(hovermode="closest", margin=dict(t=100 if title else 20))
     fig.update_xaxes(showgrid=True, gridcolor=GRID, title=dict(text="Fast-corner speed (% of best)", font=dict(size=FONT_SIZE)))
     fig.update_yaxes(title=dict(text="Straight-line speed (% of best)", font=dict(size=FONT_SIZE)))
     return fig
