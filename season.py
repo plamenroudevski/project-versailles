@@ -25,6 +25,9 @@ Sign convention everywhere: gap = the team's time minus the comparison's.
 Positive = the team is slower (losing time).
 """
 
+import re
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -210,3 +213,83 @@ def event_summary(teams, laps, phases):
         row["energy_m"] = energy
         rows.append(row)
     return pd.concat([teams.reset_index(drop=True), pd.DataFrame(rows)], axis=1)
+
+
+# ---- A season: the saved event tables added up --------------------------------
+
+SEASONS_DIR = Path(__file__).parent / "seasons"
+EVENT_FILE = re.compile(r"^(?P<round>\d{2})_(?P<event>.+)\.csv$")  # e.g. 03_suzuka.csv
+EXCLUDED_COLUMNS = ["round", "event", "team", "reason"]
+
+LEVEL_S = analysis.PATTERN_MIN_TIME_S
+# Season gaps smaller than this count as level: not a loss, not a gain.
+
+
+def list_seasons(root=SEASONS_DIR):
+    """Years with at least one saved event, newest first; [] if there are none."""
+    if not root.is_dir():
+        return []
+    years = [int(p.name) for p in root.iterdir()
+             if p.is_dir() and p.name.isdigit() and any(EVENT_FILE.match(f.name) for f in p.iterdir())]
+    return sorted(years, reverse=True)
+
+
+def load_season(year, root=SEASONS_DIR):
+    """(every event's team rows with `round` and `event` added, the excluded list)."""
+    folder = root / str(year)
+    tables = []
+    for path in sorted(folder.glob("*.csv")):
+        match = EVENT_FILE.match(path.name)
+        if match:
+            tables.append(pd.read_csv(path).assign(round=int(match["round"]), event=match["event"]))
+    events = pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()
+    excluded_path = folder / "excluded.csv"
+    excluded = pd.read_csv(excluded_path) if excluded_path.exists() else pd.DataFrame(columns=EXCLUDED_COLUMNS)
+    return events, excluded
+
+
+def area_gaps(events, team, rival=None):
+    """How `team` compares in each area over the season, one row per name in AREAS.
+
+    The comparison at each event is the fastest team in that area (default)
+    or `rival`. Only events where the area exists (time > 0) for both count.
+      gap_s     median gap per lap (s); positive = the team is slower
+      lost_n    events where the team was slower by more than LEVEL_S
+      best_n    events where the team was the fastest in that area (or, against
+                a rival, faster by more than LEVEL_S)
+      events_n  events counted
+    """
+    rows = []
+    for area in AREAS:
+        gaps = []
+        for _, event in events.groupby("round"):
+            times = event.set_index("team")[area]
+            times = times[times > 0]
+            if team not in times:
+                continue
+            if rival is None:
+                gaps.append(times[team] - times.min())
+            elif rival in times:
+                gaps.append(times[team] - times[rival])
+        gaps = np.array(gaps)
+        best = (gaps <= 0) if rival is None else (gaps < -LEVEL_S)
+        rows.append({"area": area, "gap_s": float(np.median(gaps)) if len(gaps) else np.nan,
+                     "lost_n": int((gaps > LEVEL_S).sum()), "best_n": int(best.sum()), "events_n": len(gaps)})
+    return pd.DataFrame(rows)
+
+
+def efficiency(events):
+    """The efficiency map: each team's corner and straight speed as % of each event's best.
+
+    x_pct, y_pct          this event: fast-corner and straight-line speed, % of the best team
+    season_x, season_y    the team's median up to and including this round: the
+                          trail, which moves as upgrades arrive. NaN rounds (no
+                          fast corner / long straight) are skipped.
+    """
+    eff = events[["team", "team_colour", "round"]].copy()
+    for column, pct in (("fast_corner_kmh", "x_pct"), ("straight_kmh", "y_pct")):
+        eff[pct] = 100 * events[column] / events.groupby("round")[column].transform("max")
+    eff = eff.sort_values(["team", "round"]).reset_index(drop=True)
+    for pct, trail in (("x_pct", "season_x"), ("y_pct", "season_y")):
+        eff[trail] = eff.groupby("team")[pct].transform(lambda s: s.expanding().median())
+    return eff

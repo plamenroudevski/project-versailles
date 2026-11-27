@@ -181,3 +181,76 @@ def test_earlier_energy_drop_counts_more_metres():
 def test_straight_speed_is_peak_before_drop():
     summary = season.event_summary(TEAMS_2, ENERGY_LAPS, ENERGY_PHASES)
     assert summary.loc[0, "straight_kmh"] == pytest.approx(320, abs=1)
+
+
+# ---- season aggregation and efficiency map -----------------------------------
+
+def make_events(times, fast=None, straight=None, no_area=()):
+    """Event rows like load_season returns. `times[round][team]` is the time in
+    every area; `fast`/`straight` give [round][team] speeds (default 250/320)."""
+    rows = []
+    for rnd, teams in times.items():
+        for team, t in teams.items():
+            row = {"round": rnd, "event": f"event{rnd}", "team": team, "team_colour": "FFFFFF"}
+            row.update({a: (0.0 if a in no_area else t) for a in season.AREAS})
+            row["fast_corner_kmh"] = (fast or {}).get(rnd, {}).get(team, 250.0)
+            row["straight_kmh"] = (straight or {}).get(rnd, {}).get(team, 320.0)
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+EVENTS = make_events({1: {"Alpha": 1.0, "Bravo": 1.2}, 2: {"Alpha": 1.0, "Bravo": 1.3}})
+
+
+def test_best_team_gap_is_zero_and_counted_best():
+    gaps = season.area_gaps(EVENTS, "Alpha")
+    assert list(gaps["area"]) == season.AREAS
+    assert (gaps["gap_s"] == 0).all() and (gaps["best_n"] == gaps["events_n"]).all()
+    assert (gaps["events_n"] == 2).all()
+
+
+def test_rival_gap_sign():
+    gaps = season.area_gaps(EVENTS, "Bravo", rival="Alpha")
+    assert (gaps["gap_s"] > 0).all() and (gaps["lost_n"] == 2).all()
+
+
+def test_level_gap_not_counted_lost():
+    gaps = season.area_gaps(make_events({1: {"Alpha": 1.0, "Bravo": 1.005}}), "Bravo")
+    assert (gaps["lost_n"] == 0).all()
+
+
+def test_missing_area_not_counted():
+    events = make_events({1: {"Alpha": 1.0, "Bravo": 1.2}}, no_area={"Cornering · fast"})
+    gaps = season.area_gaps(events, "Alpha").set_index("area")
+    assert gaps.loc["Cornering · fast", "events_n"] == 0
+    assert gaps.loc["Full throttle", "events_n"] == 1
+
+
+def test_efficiency_best_is_100_and_nan_skipped():
+    events = make_events({1: {"Alpha": 1.0, "Bravo": 1.2}, 2: {"Alpha": 1.0, "Bravo": 1.2}},
+                         straight={2: {"Alpha": np.nan, "Bravo": np.nan}})
+    eff = season.efficiency(events)
+    alpha = eff[eff["team"] == "Alpha"]
+    assert alpha["x_pct"].max() == pytest.approx(100)
+    assert alpha["season_y"].notna().all()
+
+
+def test_trail_moves_with_upgrade():
+    rounds = {r: {"Alpha": 1.0, "Bravo": 1.2} for r in (1, 2, 3, 4)}
+    straight = {r: {"Alpha": 330.0, "Bravo": 300.0 if r < 3 else 330.0} for r in (1, 2, 3, 4)}
+    eff = season.efficiency(make_events(rounds, straight=straight))
+    trail = eff[eff["team"] == "Bravo"].sort_values("round")["season_y"].tolist()
+    assert trail[-1] > trail[0]
+
+
+def test_list_seasons_missing_folder(tmp_path):
+    assert season.list_seasons(tmp_path / "nope") == []
+
+
+def test_load_season_reads_round_and_event(tmp_path):
+    (tmp_path / "2026").mkdir()
+    make_events({1: {"Alpha": 1.0}}).drop(columns=["round", "event"]).to_csv(tmp_path / "2026" / "03_suzuka.csv", index=False)
+    assert season.list_seasons(tmp_path) == [2026]
+    events, excluded = season.load_season(2026, tmp_path)
+    assert events["round"].unique().tolist() == [3] and events["event"].iloc[0] == "suzuka"
+    assert excluded.empty and list(excluded.columns) == ["round", "event", "team", "reason"]
