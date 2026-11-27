@@ -57,6 +57,16 @@ TRACTION_START_PCT = 10
 # median throttle reaches this. Below it the driver is still balancing the
 # car mid-corner; above it they are asking the rear tyres for drive.
 
+BAND_LEEWAY_KMH = 30
+MINIMAL_BRAKING_M = 30
+HEAVY_DROP_KMH = 150
+# Leeway on the 120 / 200 km/h corner bands, from Flow Racers' braking-based
+# definition (flowracers.com/blog/f1-corner-types). A corner within 30 km/h
+# under 200 (from 170) that needs at most a brake tap (30 m is about one
+# sample at 4 Hz) is fast, like the Suzuka esses (179 km/h, 26 m of braking).
+# A corner within 30 km/h over 120 (under 150) that the field slows down for
+# by 150 km/h or more is slow, like a hairpin at the end of a long straight.
+
 # =============================================================================
 
 AREAS = [
@@ -91,11 +101,28 @@ def runs(mask):
     return list(zip(edges[::2], edges[1::2]))
 
 
-def band(min_speed):
-    """Corner speed band from a corner's slowest speed (analysis.py's bands)."""
+def band(min_speed, braking_m=0.0, drop_kmh=0.0):
+    """Corner speed band: the slowest speed first, braking decides near the edges.
+
+    The general bands are analysis.py's: slow under LOW_SPEED_MAX_KMH (120),
+    fast from HIGH_SPEED_MIN_KMH (200). Flow Racers' F1 corner types define
+    corners by braking instead ("a fast corner ... requires minimal to no
+    braking"; slow corners make the driver slow down heavily), so within
+    BAND_LEEWAY_KMH of an edge:
+      - a corner with at most MINIMAL_BRAKING_M of braking counts as fast
+      - a corner the field slows down for by HEAVY_DROP_KMH or more counts as slow
+    `braking_m` = metres the field brakes in the corner; `drop_kmh` = entry
+    speed minus slowest speed.
+    """
     if min_speed < LOW_SPEED_MAX_KMH:
         return "slow"
-    return "fast" if min_speed >= HIGH_SPEED_MIN_KMH else "medium"
+    if min_speed >= HIGH_SPEED_MIN_KMH:
+        return "fast"
+    if braking_m <= MINIMAL_BRAKING_M and min_speed >= HIGH_SPEED_MIN_KMH - BAND_LEEWAY_KMH:
+        return "fast"
+    if drop_kmh >= HEAVY_DROP_KMH and min_speed < LOW_SPEED_MAX_KMH + BAND_LEEWAY_KMH:
+        return "slow"
+    return "medium"
 
 
 def corner_complexes(trace):
@@ -140,9 +167,9 @@ def phase_map(trace, corners):
 
     for number, (s, e) in enumerate(corner_complexes(trace)):
         complex_id[s:e] = number
-        bands[s:e] = band(speed[s:e].min())
         apex = s + int(np.argmin(speed[s:e]))
         braking = s + np.flatnonzero(brake[s:e])
+        bands[s:e] = band(speed[apex], float(brake[s:e].sum() * analysis.GRID_STEP_M), speed[s] - speed[apex])
         corner_from = s
         if len(braking):
             phase[s:braking[0]] = "Lift & coast"

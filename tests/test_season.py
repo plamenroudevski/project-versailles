@@ -349,3 +349,26 @@ def test_rerun_skips_existing_and_no_duplicate_exclusions(monkeypatch, tmp_path)
     assert len(pd.read_csv(tmp_path / "2026" / "excluded.csv")) == 1
     season.build_season(2026, tmp_path, force=True)
     assert len(calls) == 3 and len(pd.read_csv(tmp_path / "2026" / "excluded.csv")) == 1
+
+
+# ---- corner bands: speed first, braking decides near the edges (Flow Racers) ----
+
+@pytest.mark.parametrize("min_speed, braking_m, drop_kmh, expected", [
+    (250, 100, 50, "fast"),     # 200 km/h or more: fast whatever the braking
+    (179, 26, 54, "fast"),      # Suzuka esses: a brake tap, within the leeway -> fast
+    (194, 0, 6, "fast"),        # Spa lift-only corner just under 200 -> fast
+    (165, 0, 60, "medium"),     # no braking but too far below 200
+    (179, 100, 90, "medium"),   # real braking -> stays medium
+    (100, 100, 150, "slow"),    # under 120: slow
+    (135, 150, 160, "slow"),    # heavy slowing, within the leeway -> slow
+    (135, 150, 100, "medium"),  # braked, but not a heavy slow-down
+])
+def test_band_with_braking_leeway(min_speed, braking_m, drop_kmh, expected):
+    assert season.band(min_speed, braking_m, drop_kmh) == expected
+
+
+def test_lift_only_corner_below_200_is_fast():
+    def speed(d):
+        return 230 - (40 - abs(d - 440)) * 1.25 if 400 <= d < 480 else 230.0
+    pm = season.phase_map(trace(speed, lambda d: 60.0 if 400 <= d < 480 else 100.0), None)
+    assert set(pm.loc[pm["Complex"] >= 0, "Band"]) == {"fast"}

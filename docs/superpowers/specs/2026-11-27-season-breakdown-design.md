@@ -288,7 +288,10 @@ Charts in `charts.py` (Plotly), styled like the existing tyre and pace charts.
   (so lift-only fast corners count). Raised by the builder check.
 - Ferrari check is printed and reviewed, not a gate.
 - Default comparison: best team in each area, plus rival picker.
-- Speed bands 120 / 200 km/h (existing constants).
+- Speed bands 120 / 200 km/h (existing constants), with leeway from Flow
+  Racers' braking-based corner types (owner's call, 2026-11-27): within 30 km/h
+  under 200, a corner with at most a brake tap (≤ 30 m) is fast; within 30 km/h
+  over 120, a corner the field slows for by ≥ 150 km/h is slow.
 - CSV storage in `seasons/<year>/`; new `season.py`; page named "Season".
 - Per-car energy-drop metric alongside the shared phase map.
 - Build in the current look.
