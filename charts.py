@@ -749,8 +749,8 @@ def efficiency_map_figure(eff, team, title=""):
             textposition="bottom center", showlegend=False,
             textfont=dict(color=TEXT if chosen else MUTED, size=FONT_SIZE - (1 if chosen else 3)),
             marker=dict(color=colour, size=18 if chosen else 12, line=dict(color=TEXT if chosen else colour, width=2)),
-            hovertemplate=f"<b>{html.escape(row.team)}</b><br>fast corners %{{x:.2f}} % of best<br>"
-                          "straights %{y:.2f} % of best<extra></extra>"))
+            hovertemplate=f"<b>{html.escape(row.team)}</b><br>fast corners %{{x:.2f}} % of best ({row.x_n} events)<br>"
+                          f"straights %{{y:.2f}} % of best ({row.y_n} events)<extra></extra>"))
     style(fig, title, height=620)
     fig.update_layout(hovermode="closest", margin=dict(t=100 if title else 20))
     fig.update_xaxes(showgrid=True, gridcolor=GRID, title=dict(text="Fast-corner speed (% of best)", font=dict(size=FONT_SIZE)))

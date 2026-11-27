@@ -5,6 +5,8 @@ worked out by hand. No internet needed.
 Run from the project folder:   python -m pytest
 """
 
+from datetime import timedelta
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -414,3 +416,93 @@ def test_summary_strongest_area_is_not_also_a_loss():
     lines = season.summary_lines(season.area_gaps(events, "Alpha"))
     assert [line for line in lines if line.startswith("Strongest")] == [
         "Strongest in lift & coast: the best team there in 1 of 5 events."]
+
+
+# ---- final review fixes ------------------------------------------------------
+
+def two_corner_trace():
+    """One complex with two brake zones: brake 400-450 m to a 95 km/h apex at 470,
+    half throttle 480-600, brake again 600-620 to 150 km/h, 30 % from 640, full from 680."""
+    def speed(d):
+        if d < 400:
+            return 250.0
+        if d < 450:
+            return 250 - (d - 400) * 3
+        if d < 470:
+            return 100 - (d - 450) * 0.25
+        if d < 600:
+            return 95 + (d - 470) * 85 / 130
+        if d < 620:
+            return 180 - (d - 600) * 1.5
+        if d < 640:
+            return 150.0
+        return 150 + (d - 640) * 1.0
+
+    def throttle(d):
+        if 480 <= d < 600:
+            return 50.0
+        if 640 <= d < 680:
+            return 30.0
+        return 0.0 if 380 <= d < 680 else 100.0
+
+    return trace(speed, throttle, lambda d: 400 <= d < 450 or 600 <= d < 620)
+
+
+def test_two_brake_zones_in_one_complex_are_two_corners():
+    pm = season.phase_map(two_corner_trace(), None)
+    assert pm["Complex"].max() == 0                       # still one complex
+    assert (pm["Phase"] == "Braking").sum() <= 75         # 70 m of real braking, not 220
+    phases = pm.loc[pm["Complex"] == 0, "Phase"]
+    sequence = phases[phases != phases.shift()].tolist()
+    assert [p for p in sequence if p != "Lift & coast"] == [
+        "Braking", "Cornering", "Traction", "Braking", "Cornering", "Traction"]
+    assert pm.loc[(pm["Distance"] > 485) & (pm["Distance"] < 590), "Phase"].eq("Traction").all()
+
+
+def test_efficiency_counts_contributing_events():
+    events = make_events({1: {"Alpha": 1.0, "Bravo": 1.2}, 2: {"Alpha": 1.0, "Bravo": 1.2}},
+                         fast={2: {"Alpha": np.nan, "Bravo": np.nan}})
+    eff = season.efficiency(events)
+    last = eff[eff["round"] == 2].set_index("team")
+    assert last.loc["Alpha", "x_n"] == 1 and last.loc["Alpha", "y_n"] == 2
+
+
+def test_qualifying_just_finished_is_retried(monkeypatch):
+    fake_data(monkeypatch)
+    real = data.list_sessions
+    recent = (pd.Timestamp.now(tz="UTC") - timedelta(minutes=10)).isoformat()
+    monkeypatch.setattr(data, "list_sessions", lambda key: real(key).assign(date_end=recent))
+    summary, excluded = season.build_event(2026, MEETING)
+    assert summary is None and excluded[0]["reason"] == "qualifying not finished"
+    assert "qualifying not finished" in season.RETRY_REASONS
+
+
+def test_whole_event_without_valid_laps_says_so(monkeypatch):
+    fake_data(monkeypatch)
+    real = data.list_drivers
+    monkeypatch.setattr(data, "list_drivers", lambda session: real(session).assign(best_lap=np.nan))
+    summary, excluded = season.build_event(2026, MEETING)
+    assert summary is None and excluded[-1] == {"round": 1, "event": "suzuka", "team": "all", "reason": "no valid lap"}
+
+
+def test_renumbered_round_is_not_built_twice(monkeypatch, tmp_path):
+    fake_data(monkeypatch)
+    (tmp_path / "2026").mkdir()
+    (tmp_path / "2026" / "06_suzuka.csv").write_text("team\n")  # saved when Suzuka was round 6
+    calls = []
+    real = season.build_event
+    monkeypatch.setattr(season, "build_event", lambda *a: calls.append(a[1]["location"]) or real(*a))
+    season.build_season(2026, tmp_path)
+    assert "Suzuka" not in calls
+    assert not (tmp_path / "2026" / "02_suzuka.csv").exists()
+    season.build_season(2026, tmp_path, force=True)
+    names = sorted(p.name for p in (tmp_path / "2026").iterdir())
+    assert "02_suzuka.csv" in names and "06_suzuka.csv" not in names
+
+
+def test_year_with_no_events_yet(monkeypatch, tmp_path):
+    fake_data(monkeypatch)
+    monkeypatch.setattr(data, "list_events", lambda year: pd.DataFrame())
+    assert season.season_events(2027).empty
+    season.build_season(2027, tmp_path)  # must not crash
+    assert season.list_seasons(tmp_path) == []

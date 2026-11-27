@@ -26,6 +26,7 @@ Positive = the team is slower (losing time).
 """
 
 import re
+from datetime import timedelta
 import sys
 from pathlib import Path
 
@@ -138,6 +139,32 @@ def corner_complexes(trace):
     return [(s, e) for s, e in joined if d[e - 1] - d[s] >= MIN_COMPLEX_M]
 
 
+def brake_zones(brake, s, e):
+    """Brake zones inside a corner complex: [(start, end)] grid positions. Gaps
+    shorter than MIN_COMPLEX_M (vote flicker mid-braking) don't split a zone."""
+    zones = []
+    for b0, b1 in runs(brake[s:e]):
+        if zones and s + b0 - zones[-1][1] < MIN_COMPLEX_M:
+            zones[-1] = (zones[-1][0], s + b1)
+        else:
+            zones.append((s + b0, s + b1))
+    return zones
+
+
+def label_corner(phase, speed, throttle, lo, hi, b0, b1):
+    """Label one corner from lo to hi whose braking runs from b0 to b1 (b0 == b1: no braking):
+    lift & coast, braking, cornering to TRACTION_START_PCT after the slowest point, traction."""
+    phase[lo:b0] = "Lift & coast"
+    phase[b0:b1] = "Braking"
+    if b1 >= hi:
+        return
+    apex = b1 + int(np.argmin(speed[b1:hi]))
+    pushing = apex + np.flatnonzero(throttle[apex:hi] >= TRACTION_START_PCT)
+    traction_from = pushing[0] if len(pushing) else hi
+    phase[b1:traction_from] = "Cornering"
+    phase[traction_from:hi] = "Traction"
+
+
 def phase_map(trace, corners):
     """Label every metre of the lap with what the field is doing there.
 
@@ -168,17 +195,17 @@ def phase_map(trace, corners):
     for number, (s, e) in enumerate(corner_complexes(trace)):
         complex_id[s:e] = number
         apex = s + int(np.argmin(speed[s:e]))
-        braking = s + np.flatnonzero(brake[s:e])
         bands[s:e] = band(speed[apex], float(brake[s:e].sum() * analysis.GRID_STEP_M), speed[s] - speed[apex])
-        corner_from = s
-        if len(braking):
-            phase[s:braking[0]] = "Lift & coast"
-            phase[braking[0]:braking[-1] + 1] = "Braking"
-            corner_from = braking[-1] + 1
-        pushing = apex + np.flatnonzero(throttle[apex:e] >= TRACTION_START_PCT)
-        traction_from = max(pushing[0] if len(pushing) else e, corner_from)
-        phase[corner_from:traction_from] = "Cornering"
-        phase[traction_from:e] = "Traction"
+        zones = brake_zones(brake, s, e)
+        if not zones:  # lift-only corner
+            label_corner(phase, speed, throttle, s, e, s, s)
+        # Linked corners with several brake zones (a chicane): each zone starts its
+        # own corner, split from the next at the fastest point between them.
+        lo = s
+        for k, (b0, b1) in enumerate(zones):
+            hi = e if k == len(zones) - 1 else b1 + int(np.argmax(speed[b1:zones[k + 1][0]]))
+            label_corner(phase, speed, throttle, lo, hi, b0, b1)
+            lo = hi
         if located is not None:
             inside = located[(located["Distance"] >= d[s]) & (located["Distance"] <= d[e - 1])]
             tags[s:e] = "/".join(inside["Label"])
@@ -315,13 +342,15 @@ def efficiency(events):
     season_x, season_y    the team's median up to and including this round: the
                           trail, which moves as upgrades arrive. NaN rounds (no
                           fast corner / long straight) are skipped.
+    x_n, y_n              how many events each median rests on so far
     """
     eff = events[["team", "team_colour", "round"]].copy()
     for column, pct in (("fast_corner_kmh", "x_pct"), ("straight_kmh", "y_pct")):
         eff[pct] = 100 * events[column] / events.groupby("round")[column].transform("max")
     eff = eff.sort_values(["team", "round"]).reset_index(drop=True)
-    for pct, trail in (("x_pct", "season_x"), ("y_pct", "season_y")):
+    for pct, trail, count in (("x_pct", "season_x", "x_n"), ("y_pct", "season_y", "y_n")):
         eff[trail] = eff.groupby("team")[pct].transform(lambda s: s.expanding().median())
+        eff[count] = eff.groupby("team")[pct].transform(lambda s: s.notna().cumsum())
     return eff
 
 
@@ -383,14 +412,21 @@ METHOD_TEXT = [
 # Downloads: building the season offline (python season.py 2026).
 # =============================================================================
 
-RETRY_REASONS = {"no qualifying session"}
+RETRY_REASONS = {"no qualifying session", "qualifying not finished"}
 # Whole-event exclusions worth trying again on the next run: on a race
-# weekend the qualifying session may simply not have happened yet.
+# weekend the qualifying session may not have happened yet, or OpenF1 may
+# still be filling in its laps and telemetry.
+
+QUALI_SETTLE_H = 1
+# Qualifying counts as finished this many hours after its scheduled end.
+# Building earlier could save half a session's laps for good.
 
 
 def season_events(year):
     """The year's race weekends, oldest first, numbered 1..n (pre-season testing left out)."""
     meetings = data.list_events(year)
+    if meetings.empty:
+        return meetings.assign(round=pd.Series(dtype=int))
     meetings = meetings[~meetings["meeting_name"].str.contains("Testing", case=False)]
     meetings = meetings.sort_values("date_start").reset_index(drop=True)
     return meetings.assign(round=range(1, len(meetings) + 1))
@@ -439,13 +475,17 @@ def build_event(year, meeting):
     if quali.empty:
         return None, [excluded("all", "no qualifying session")]
     session = quali.iloc[0]
+    end = pd.to_datetime(session.get("date_end"), utc=True, errors="coerce")
+    if pd.notna(end) and end > pd.Timestamp.now(tz="UTC") - timedelta(hours=QUALI_SETTLE_H):
+        return None, [excluded("all", "qualifying not finished")]
     if data.session_had_rain(int(session["session_key"])):
         return None, [excluded("all", "wet")]
 
     teams, laps, missing = team_laps(session, data.list_drivers(session))
     gone = [excluded(team, reason) for team, reason in missing.items()]
     if teams.empty:
-        return None, gone + [excluded("all", "no telemetry")]
+        reason = "no valid lap" if set(missing.values()) == {"no valid lap"} else "no telemetry"
+        return None, gone + [excluded("all", reason)]
     try:
         corners = data.get_corners(year, int(session["circuit_key"]))
     except LookupError:
@@ -465,22 +505,27 @@ def build_season(year, root=SEASONS_DIR, force=False):
     folder.mkdir(parents=True, exist_ok=True)
     excluded_path = folder / "excluded.csv"
     excluded = pd.read_csv(excluded_path) if excluded_path.exists() else pd.DataFrame(columns=EXCLUDED_COLUMNS)
-    final = excluded[(excluded["team"] == "all") & ~excluded["reason"].isin(RETRY_REASONS)]["round"]
+    # Events are matched by name, not round number: if OpenF1 drops a cancelled
+    # meeting, later rounds renumber, and matching by number would save them twice.
+    final = set(excluded[(excluded["team"] == "all") & ~excluded["reason"].isin(RETRY_REASONS)]["event"])
+    saved = {match["event"]: folder / name for name in sorted(p.name for p in folder.iterdir())
+             if (match := EVENT_FILE.match(name))}
     for _, meeting in season_events(year).iterrows():
-        rnd = int(meeting["round"])
-        path = folder / f"{rnd:02d}_{data.slug(meeting['location'])}.csv"
-        if not force and (path.exists() or rnd in set(final)):
+        rnd, event = int(meeting["round"]), data.slug(meeting["location"])
+        path = folder / f"{rnd:02d}_{event}.csv"
+        if not force and (event in saved or event in final):
             continue
         try:
             summary, gone = build_event(year, meeting)
         except requests.RequestException as error:
             print(f"Round {rnd:2d} {meeting['location']}: download failed ({error}); try again later.")
             continue
-        excluded = pd.concat([excluded[excluded["round"] != rnd], pd.DataFrame(gone, columns=EXCLUDED_COLUMNS)],
+        excluded = pd.concat([excluded[excluded["event"] != event], pd.DataFrame(gone, columns=EXCLUDED_COLUMNS)],
                              ignore_index=True)
         excluded.sort_values(["round", "team"]).to_csv(excluded_path, index=False)
+        if event in saved:
+            saved[event].unlink()  # the old file, maybe under an old round number
         if summary is None:
-            path.unlink(missing_ok=True)
             print(f"Round {rnd:2d} {meeting['location']}: left out ({gone[-1]['reason']}).")
             continue
         summary.to_csv(path, index=False, float_format="%.4f")
