@@ -389,7 +389,7 @@ At every metre: the median speed, throttle and position of the 11 laps, and a br
 ### Step 3: the phase map (`phase_map`)
 
 - A **corner complex** is any stretch where the field is off full throttle. Complexes less than `MIN_FULL_GAP_M` (50 m) apart are joined (a chicane is one complex); dips shorter than `MIN_COMPLEX_M` (20 m) are sensor wobble.
-- Inside a complex: **lift & coast** before the brake, **braking**, **cornering** from brake release (or from the lift, if there's no braking) to where the throttle reaches `TRACTION_START_PCT` (10 %) after the slowest point, then **traction** until full throttle.
+- Inside a complex: **lift & coast** before the brake, **braking**, **cornering** from brake release (or from the lift, if there's no braking) to where the throttle reaches `TRACTION_START_PCT` (10 %) after the slowest point, then **traction** until full throttle. A complex with several brake zones (a chicane) is several corners: each brake zone starts its own, split from the next at the fastest point between them (`brake_zones`, `label_corner`). Before this fix, everything from the first brake to the last was "braking", which put up to 46 % of a Mexico City lap in braking; now it's 10-29 % of a lap (Monaco highest).
 - **Band** (`band`): slow under 120 km/h, fast from 200 km/h (analysis.py's bands). Within `BAND_LEEWAY_KMH` (30) of an edge, braking decides, from Flow Racers' braking-based corner types: a corner needing at most `MINIMAL_BRAKING_M` (30 m, a tap) is fast; one slowed for by `HEAVY_DROP_KMH` (150) or more is slow.
 - On straights of at least 300 m, `analysis.straight_metrics` judges the field's speed: if it **drops** after its peak, the part after the peak is **energy-limited**; if it **flattens**, the level part at the end is.
 
@@ -403,7 +403,7 @@ Per area: the median over events of the team's time minus the fastest team's (or
 
 ### The offline build (`build_season`)
 
-`python season.py 2026` walks the season's race weekends (testing skipped), skips events already saved, and writes `seasons/2026/<round>_<city>.csv` plus `excluded.csv`. Wet sessions and teams without telemetry are left out for good; a missing qualifying session (the weekend may still be running) and download errors are retried next time. If the faster driver's lap has no telemetry, the teammate's lap is used. It ends with the Ferrari check. The page never downloads anything, and doesn't cache the files either: a cached copy could outlive a push that adds a race (the 25 Nov RPM lesson in section 11).
+`python season.py 2026` walks the season's race weekends (testing skipped), skips events already saved, and writes `seasons/2026/<round>_<city>.csv` plus `excluded.csv`. Wet sessions and teams without telemetry are left out for good; a missing qualifying session, one that ended less than `QUALI_SETTLE_H` (1 hour) ago, and download errors are retried next time. Events are matched by name, not round number, so if OpenF1 drops a cancelled meeting and renumbers the rest, nothing is saved twice. If the faster driver's lap has no telemetry, the teammate's lap is used. It ends with the Ferrari check. The page never downloads anything, and doesn't cache the files either: a cached copy could outlive a push that adds a race (the 25 Nov RPM lesson in section 11).
 
 ### Tests
 
@@ -411,7 +411,7 @@ Per area: the median over events of the team's time minus the fastest team's (or
 
 ### Honest weaknesses of the season breakdown
 
-- **Where, not why:** time is counted where it's spent. A poor exit also slows the next straight, and arriving slower at a corner shortens braking, so Ferrari "gains" 0.35 s in slow-corner braking against Mercedes partly *because* it's slower on the straights.
+- **Where, not why:** time is counted where it's spent. A poor exit also slows the next straight, and arriving slower at a corner shortens braking, so Ferrari "gains" 0.32 s in slow-corner braking against Mercedes partly *because* it's slower on the straights.
 - **Linked corners are banded by their slowest point** and flat-out corners count as straight, so 7 of 18 events in 2026 have no fast-corner data (Austin's esses and Shanghai's T7-8 are probably merged with slower corners).
 - **Energy-limited is generous:** it includes cars sitting at their drag-limited top speed, not only cars out of battery.
 - **One lap per team per event,** from whichever driver was faster: a driver's mistake moves the team's numbers.
