@@ -673,6 +673,107 @@ def tyre_sensitivity_figure(run, title=""):
     return fig
 
 
+def season_areas_figure(gaps, team_colour, title="", rival=None):
+    """Season chart 1: the team's typical gap per lap in each of season.AREAS, top to bottom.
+
+    `gaps` is season.area_gaps' table. Bars beyond the level line
+    (season.LEVEL_S) are filled in the team colour for a loss and hollow for
+    a gain, so shape as well as colour carries the sign; level bars are grey.
+    Each bar says how consistent it is: "lost 16/18" (or "best"/"ahead").
+    """
+    import season
+
+    ahead = "ahead" if rival else "best"
+    colours, outlines, labels, values = [], [], [], []
+    for row in gaps.itertuples():
+        if row.events_n == 0:
+            values.append(0.0)
+            colours.append(BACKGROUND)
+            outlines.append(BACKGROUND)
+            labels.append("not at these circuits")
+            continue
+        values.append(row.gap_s)
+        if row.gap_s > season.LEVEL_S:
+            colours.append(team_colour)
+            outlines.append(team_colour)
+            labels.append(f"{row.gap_s:+.3f} s · lost {row.lost_n}/{row.events_n}")
+        elif row.gap_s < -season.LEVEL_S:
+            colours.append(BACKGROUND)
+            outlines.append(team_colour)
+            labels.append(f"{row.gap_s:+.3f} s · {ahead} {row.best_n}/{row.events_n}")
+        else:
+            colours.append(MUTED)
+            outlines.append(MUTED)
+            labels.append(f"level · lost {row.lost_n}/{row.events_n}")
+    fig = go.Figure(go.Bar(
+        x=values, y=gaps["area"].tolist(), orientation="h", text=labels, textposition="outside",
+        cliponaxis=False, marker=dict(color=colours, line=dict(color=outlines, width=2)),
+        textfont=dict(size=FONT_SIZE - 2),
+        hovertemplate="<b>%{y}</b><br>%{text}<extra></extra>"))
+    style(fig, title, height=160 + 40 * len(gaps))
+    against = f"vs {html.escape(rival)}" if rival else "vs the best team in each area"
+    fig.update_layout(margin=dict(l=170, r=170), bargap=0.35)
+    fig.update_xaxes(zeroline=True, zerolinecolor=MUTED,
+                     title=dict(text=f"Time lost per lap {against} (s) · + = slower", font=dict(size=FONT_SIZE)))
+    fig.update_yaxes(autorange="reversed", showgrid=False)  # first area at the top
+    return fig
+
+
+def efficiency_map_figure(eff, team, title=""):
+    """Season chart 2: fast-corner speed against straight-line speed, both as % of each event's best.
+
+    One dot per team at its latest season position (median over the events so
+    far). The chosen team's trail shows where it sat after each round, so an
+    upgrade shows up as the trail moving. Top right = quick everywhere.
+    """
+    latest = eff.sort_values("round").groupby("team").tail(1)
+    latest = latest[latest["season_x"].notna() & latest["season_y"].notna()]
+    fig = go.Figure()
+    trail = eff[eff["team"] == team].sort_values("round")
+    if len(trail):
+        colour = team_colour(trail["team_colour"].iloc[0])
+        fig.add_trace(go.Scatter(
+            x=trail["season_x"], y=trail["season_y"], mode="lines+markers+text", connectgaps=True,
+            # Only the first and last rounds are labelled: late rounds bunch up as the median settles.
+            text=[f"R{r}" if i in (0, len(trail) - 1) else "" for i, r in enumerate(trail["round"])],
+            customdata=trail["round"], textposition="top center",
+            textfont=dict(color=MUTED, size=FONT_SIZE - 4), showlegend=False,
+            line=dict(color=see_through(colour, 0.5), width=2), marker=dict(color=colour, size=5),
+            hovertemplate=f"<b>{html.escape(team)}</b> after round %{{customdata}}<br>"
+                          "fast corners %{x:.2f} %<br>straights %{y:.2f} %<extra></extra>"))
+    for row in latest.itertuples():
+        colour = team_colour(row.team_colour)
+        chosen = row.team == team
+        fig.add_trace(go.Scatter(
+            x=[row.season_x], y=[row.season_y], mode="markers+text", text=[html.escape(row.team)],
+            textposition="bottom center", showlegend=False,
+            textfont=dict(color=TEXT if chosen else MUTED, size=FONT_SIZE - (1 if chosen else 3)),
+            marker=dict(color=colour, size=18 if chosen else 12, line=dict(color=TEXT if chosen else colour, width=2)),
+            hovertemplate=f"<b>{html.escape(row.team)}</b><br>fast corners %{{x:.2f}} % of best<br>"
+                          "straights %{y:.2f} % of best<extra></extra>"))
+    style(fig, title, height=620)
+    fig.update_layout(hovermode="closest")
+    fig.update_xaxes(showgrid=True, gridcolor=GRID, title=dict(text="Fast-corner speed (% of best)", font=dict(size=FONT_SIZE)))
+    fig.update_yaxes(title=dict(text="Straight-line speed (% of best)", font=dict(size=FONT_SIZE)))
+    return fig
+
+
+def season_main(year, team):
+    import season
+
+    events, _ = season.load_season(year)
+    if events.empty:
+        sys.exit(f"No saved {year} season. Run: python season.py {year}")
+    colour = team_colour(events.loc[events["team"] == team, "team_colour"].iloc[0])
+    os.makedirs("output", exist_ok=True)
+    stem = os.path.join("output", f"{year}_season")
+    figures = {"areas": season_areas_figure(season.area_gaps(events, team), colour, f"{year} · {team}: where the lap time goes"),
+               "efficiency": efficiency_map_figure(season.efficiency(events), team, f"{year} · efficiency map")}
+    for suffix, fig in figures.items():
+        fig.write_html(f"{stem}_{suffix}.html", include_plotlyjs="cdn", config={"displaylogo": False})
+        print(f"Saved {stem}_{suffix}.html")
+
+
 def tyres_main(year, place):
     import data
     import tyres
@@ -737,7 +838,9 @@ def race_pace_main(year, place):
 if __name__ == "__main__":
     args = sys.argv[1:] or ["2026", "Brazil", "Qualifying", "NOR", "RUS"]
     try:
-        if len(args) == 2:  # year and place only: race pace
+        if len(args) == 3 and args[1].lower() == "season":  # year, "season", team: season breakdown
+            season_main(int(args[0]), args[2])
+        elif len(args) == 2:  # year and place only: race pace
             race_pace_main(int(args[0]), args[1])
         elif len(args) == 3 and args[2].lower() == "tyres":  # year, place, "tyres": tyre degradation
             tyres_main(int(args[0]), args[1])

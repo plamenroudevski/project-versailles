@@ -372,3 +372,11 @@ def test_lift_only_corner_below_200_is_fast():
         return 230 - (40 - abs(d - 440)) * 1.25 if 400 <= d < 480 else 230.0
     pm = season.phase_map(trace(speed, lambda d: 60.0 if 400 <= d < 480 else 100.0), None)
     assert set(pm.loc[pm["Complex"] >= 0, "Band"]) == {"fast"}
+
+
+def test_load_season_keeps_all_digit_team_colours_as_text(tmp_path):
+    (tmp_path / "2026").mkdir()
+    make_events({1: {"Aston Martin": 1.0}}).drop(columns=["round", "event"]).assign(team_colour="229971").to_csv(
+        tmp_path / "2026" / "01_melbourne.csv", index=False)
+    events, _ = season.load_season(2026, tmp_path)
+    assert events["team_colour"].iloc[0] == "229971"

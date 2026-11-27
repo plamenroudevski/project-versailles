@@ -92,3 +92,34 @@ def test_tyre_charts_show_every_team_and_grey_out_missing_data():
 
     ranks = charts.tyre_sensitivity_figure(run)
     assert [trace.y for trace in ranks.data] == [(1, 1, 1)]  # only McLaren has a number: rank 1 at every fuel value
+
+
+# ---- season charts ----------------------------------------------------------
+
+import season  # noqa: E402
+from test_season import make_events  # noqa: E402
+
+SEASON_EVENTS = make_events({r: {"Alpha": 1.0, "Bravo": 1.2, "Charlie": 1.1} for r in (1, 2, 3)},
+                            straight={r: {"Alpha": 330.0, "Bravo": 300.0 + 10 * r, "Charlie": 320.0} for r in (1, 2, 3)},
+                            no_area={"Cornering · fast"})
+
+
+def test_season_areas_figure_has_all_areas_in_order():
+    fig = charts.season_areas_figure(season.area_gaps(SEASON_EVENTS, "Bravo"), "#E8002D")
+    assert list(fig.data[0].y) == season.AREAS
+    assert "lost 3/3" in fig.data[0].text[season.AREAS.index("Full throttle")]
+    assert fig.data[0].text[season.AREAS.index("Cornering · fast")] == "not at these circuits"
+
+
+def test_season_areas_figure_rival_wording():
+    fig = charts.season_areas_figure(season.area_gaps(SEASON_EVENTS, "Alpha", rival="Bravo"), "#E8002D", rival="Bravo")
+    assert "ahead 3/3" in fig.data[0].text[season.AREAS.index("Full throttle")]
+    assert "Bravo" in fig.layout.xaxis.title.text
+
+
+def test_efficiency_map_one_dot_per_team_and_a_trail():
+    fig = charts.efficiency_map_figure(season.efficiency(SEASON_EVENTS), "Bravo")
+    dots = [t for t in fig.data if t.mode and "markers" in t.mode and "lines" not in t.mode]
+    assert sum(len(t.x) for t in dots) == 3
+    trails = [t for t in fig.data if t.mode and "lines" in t.mode]
+    assert len(trails) == 1 and len(trails[0].x) == 3

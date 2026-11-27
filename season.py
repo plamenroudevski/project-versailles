@@ -271,7 +271,7 @@ def load_season(year, root=SEASONS_DIR):
     for path in sorted(folder.glob("*.csv")):
         match = EVENT_FILE.match(path.name)
         if match:
-            tables.append(pd.read_csv(path).assign(round=int(match["round"]), event=match["event"]))
+            tables.append(pd.read_csv(path, dtype={"team_colour": str}).assign(round=int(match["round"]), event=match["event"]))
     events = pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()
     excluded_path = folder / "excluded.csv"
     excluded = pd.read_csv(excluded_path) if excluded_path.exists() else pd.DataFrame(columns=EXCLUDED_COLUMNS)
