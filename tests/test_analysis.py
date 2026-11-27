@@ -198,3 +198,24 @@ def test_earlier_braking_is_found_end_to_end():
     assert "m earlier" in top["text"]
     # The zones cover the lap exactly once, so their gaps add up to the lap-time gap.
     assert result["table"]["Gap s"].sum() == pytest.approx(time_b - time_a)
+
+
+# ---- align_field: any number of laps on one grid ----------------------------
+
+def test_align_field_two_laps_matches_align_laps():
+    tel_a, t_a = simulate_lap(lambda d: 200.0)
+    tel_b, t_b = simulate_lap(lambda d: 190.0)
+    a, b, _ = analysis.align_laps(tel_a, t_a, tel_b, t_b)
+    fa, fb = analysis.align_field([(tel_a, t_a), (tel_b, t_b)])
+    pd.testing.assert_frame_equal(a, fa)
+    pd.testing.assert_frame_equal(b, fb)
+
+
+def test_align_field_three_laps_share_grid():
+    laps = [simulate_lap(lambda d, v=v: v) for v in (200.0, 195.0, 190.0)]
+    out = analysis.align_field(laps)
+    assert len({len(lap) for lap in out}) == 1
+    for lap in out[1:]:
+        np.testing.assert_array_equal(lap["Distance"], out[0]["Distance"])
+    for lap, (_, t) in zip(out, laps):
+        assert lap["Time"].iloc[-1] == pytest.approx(t, abs=1e-6)

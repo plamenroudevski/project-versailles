@@ -167,13 +167,22 @@ def align_laps(tel_a, lap_time_a, tel_b, lap_time_b):
     Returns (a, b, delta): both laps on the grid (columns Distance, Time,
     Speed, Throttle, RPM, Brake, Gear, X, Y) and the delta in seconds per grid point.
     """
-    own_lengths = [np.interp(lap_time, tel["Time"], tel["Distance"])
-                   for tel, lap_time in ((tel_a, lap_time_a), (tel_b, lap_time_b))]
+    a, b = align_field([(tel_a, lap_time_a), (tel_b, lap_time_b)])
+    return a, b, (b["Time"] - a["Time"]).to_numpy()
+
+
+def align_field(laps):
+    """Steps 1-3 of align_laps for any number of laps: [(telemetry, lap_time), ...].
+
+    Every lap is stretched to the mean of all the laps' own lengths, so the
+    whole field (season.py compares 11 teams) shares one distance grid and
+    the same corner sits at the same metre for everyone.
+    Returns the laps on that grid, in the order given.
+    """
+    own_lengths = [np.interp(lap_time, tel["Time"], tel["Distance"]) for tel, lap_time in laps]
     length = float(np.mean(own_lengths))
     grid = np.linspace(0.0, length, int(round(length / GRID_STEP_M)) + 1)
-    a = resample(tel_a, grid, length / own_lengths[0])
-    b = resample(tel_b, grid, length / own_lengths[1])
-    return a, b, (b["Time"] - a["Time"]).to_numpy()
+    return [resample(tel, grid, length / own) for (tel, _), own in zip(laps, own_lengths)]
 
 
 def corner_labels(corners):
